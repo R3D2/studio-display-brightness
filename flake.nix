@@ -148,6 +148,10 @@
     {
       nixosModules.default = nixosModule;
       nixosModules.studio-display-brightness = nixosModule;
+      # Both spellings: `homeModules` is what home-manager settled on, and
+      # `homeManagerModules` is what a good deal of existing config still says.
+      homeModules.default = homeModule;
+      homeModules.studio-display-brightness = homeModule;
       homeManagerModules.default = homeModule;
       homeManagerModules.studio-display-brightness = homeModule;
 

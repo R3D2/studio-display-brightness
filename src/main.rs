@@ -1,6 +1,7 @@
 mod ddc;
 mod hid;
 mod monitors;
+mod osd;
 mod watch;
 
 use anyhow::{Context, Result};
@@ -63,6 +64,11 @@ struct Target {
     /// are looking at.
     #[arg(long)]
     display: Option<String>,
+
+    /// Show the new level as a notification. For a key binding, where there is
+    /// nothing else on screen to say what happened.
+    #[arg(long)]
+    notify: bool,
 }
 
 impl Target {
@@ -92,7 +98,7 @@ fn run() -> Result<()> {
         Command::Set { percent, target } => {
             let display = target.resolve()?;
             display.set(percent.min(100))?;
-            report(&display, percent.min(100))
+            report(&display, percent.min(100), target.notify)
         }
         Command::Up { step, target } => nudge(&target, step as i16),
         Command::Down { step, target } => nudge(&target, -(step as i16)),
@@ -108,7 +114,7 @@ fn run() -> Result<()> {
                 .find(|p| *p > now)
                 .unwrap_or(PRESETS[0]);
             display.set(next)?;
-            report(&display, next)
+            report(&display, next, target.notify)
         }
         Command::List => {
             for display in monitors::all()? {
@@ -140,13 +146,16 @@ fn nudge(target: &Target, delta: i16) -> Result<()> {
     let now = i16::from(display.get()?);
     let next = (now + delta).clamp(0, 100) as u8;
     display.set(next)?;
-    report(&display, next)
+    report(&display, next, target.notify)
 }
 
-fn report(display: &monitors::Display, percent: u8) -> Result<()> {
+fn report(display: &monitors::Display, percent: u8, notify: bool) -> Result<()> {
     // Written where the bar's `watch` can see it, so scrolling shows up
     // immediately instead of at the next poll.
     watch::note(&display.connector, percent).context("recording the new level")?;
+    if notify {
+        osd::show(&display.short_name(), percent);
+    }
     println!("{percent}");
     Ok(())
 }

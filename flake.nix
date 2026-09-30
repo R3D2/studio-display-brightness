@@ -113,6 +113,33 @@
                 default = 5;
                 description = "How far one notch of the scroll wheel moves it.";
               };
+
+              icons = lib.mkOption {
+                type = lib.types.attrsOf lib.types.str;
+                default = { };
+                example = {
+                  dim = "ri-contrast-line-symbolic";
+                  mid = "ri-sun-line-symbolic";
+                  bright = "ri-sun-fill-symbolic";
+                };
+                description = ''
+                  Icon per level, keyed by the class `watch` reports: `dim`
+                  below 20%, `bright` above 80%, `mid` in between. Empty by
+                  default, because icon names are whichever theme you have
+                  installed and a wrong one renders as nothing at all.
+                '';
+              };
+
+              extraSettings = lib.mkOption {
+                type = lib.types.attrs;
+                default = { };
+                example = { label-max-length = 22; border-show = true; };
+                description = ''
+                  Anything else the bar takes for a custom module — colours,
+                  borders, label length. Merged over what is set here, so it can
+                  also override it.
+                '';
+              };
             };
           };
 
@@ -122,24 +149,30 @@
             (lib.mkIf cfg.wayle.enable (
               let bin = "${cfg.package}/bin/studio-display-brightness";
               in {
-                services.wayle.settings.modules.custom = lib.mkAfter [{
-                  id = cfg.wayle.id;
-                  command = "${bin} watch";
-                  mode = "watch";
-                  restart-policy = "on-exit";
-                  format = "{{ text }}";
-                  tooltip-format = "{{ tooltip }}";
-                  class-format = "{{ class }}";
+                services.wayle.settings.modules.custom = lib.mkAfter [
+                  ({
+                    id = cfg.wayle.id;
+                    command = "${bin} watch";
+                    mode = "watch";
+                    restart-policy = "on-exit";
+                    format = "{{ text }}";
+                    tooltip-format = "{{ tooltip }}";
+                    class-format = "{{ class }}";
 
-                  # A custom module is not told which bar it is drawn on, so it
-                  # follows the focused screen. With input:follow_mouse = 1 that
-                  # is the screen under the pointer, which is the bar being
-                  # scrolled.
-                  scroll-up = "${bin} up --step ${toString cfg.wayle.step}";
-                  scroll-down = "${bin} down --step ${toString cfg.wayle.step}";
-                  left-click = "${bin} cycle";
-                  right-click = "${bin} set 100";
-                }];
+                    # A custom module is not told which bar it is drawn on, so
+                    # it follows the focused screen. With input:follow_mouse = 1
+                    # that is the screen under the pointer, which is the bar
+                    # being scrolled.
+                    scroll-up = "${bin} up --step ${toString cfg.wayle.step}";
+                    scroll-down = "${bin} down --step ${toString cfg.wayle.step}";
+                    left-click = "${bin} cycle";
+                    right-click = "${bin} set 100";
+                  }
+                  // lib.optionalAttrs (cfg.wayle.icons != { }) {
+                    icon-map = cfg.wayle.icons;
+                  }
+                  // cfg.wayle.extraSettings)
+                ];
               }
             ))
           ]);
@@ -170,11 +203,16 @@
 
           nativeBuildInputs = [ pkgs.makeWrapper ];
 
-          # ddcutil reaches every non-Apple monitor and hyprctl says which screen
-          # you are looking at. Both go on the PATH rather than being hoped for.
+          # ddcutil reaches every non-Apple monitor, hyprctl says which screen
+          # you are looking at, and notify-send is the OSD that `--notify` asks
+          # for. All three go on the PATH rather than being hoped for.
           postInstall = ''
             wrapProgram $out/bin/studio-display-brightness \
-              --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ddcutil pkgs.hyprland ]}
+              --prefix PATH : ${pkgs.lib.makeBinPath [
+                pkgs.ddcutil
+                pkgs.hyprland
+                pkgs.libnotify
+              ]}
           '';
 
           meta = {

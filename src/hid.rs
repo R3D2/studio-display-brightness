@@ -23,6 +23,7 @@
 //! trailing `u16` the display leaves at zero — and the range is the panel's own
 //! 600-nit spec rather than an arbitrary scale.
 
+use crate::percent::Percent;
 use anyhow::{anyhow, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -41,6 +42,10 @@ const DISPLAY_PRODUCTS: [&str; 3] = ["00001114", "00001116", "00001118"];
 /// a value outside this range.
 const RAW_MIN: u32 = 400;
 const RAW_MAX: u32 = 60_000;
+
+/// Usage Page (Monitor), Usage (Monitor Control) -- the opening of the one
+/// interface that carries the brightness control.
+const BRIGHTNESS_DESCRIPTOR_PREFIX: [u8; 4] = [0x05, 0x80, 0x09, 0x01];
 
 const REPORT_ID: u8 = 1;
 const REPORT_LEN: usize = 7;
@@ -104,8 +109,8 @@ impl StudioDisplay {
     }
 
     /// Brightness as a percentage of the panel's usable range.
-    pub fn get(&self) -> Result<u8> {
-        Ok(to_percent(self.raw()?))
+    pub fn get(&self) -> Result<Percent> {
+        Ok(Percent::scaled_from(self.raw()?, RAW_MIN, RAW_MAX))
     }
 
     fn raw(&self) -> Result<u32> {
@@ -133,8 +138,8 @@ impl StudioDisplay {
         Ok(u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]))
     }
 
-    pub fn set(&self, percent: u8) -> Result<()> {
-        let raw = from_percent(percent);
+    pub fn set(&self, percent: Percent) -> Result<()> {
+        let raw = percent.scaled_into(RAW_MIN, RAW_MAX);
         let file = self.open()?;
         let mut buf = [0u8; REPORT_LEN];
         buf[0] = REPORT_ID;
@@ -184,26 +189,7 @@ fn describes_brightness(sysfs: &Path) -> bool {
     if file.read_to_end(&mut bytes).is_err() {
         return false;
     }
-    bytes.starts_with(&[0x05, 0x80, 0x09, 0x01])
-}
-
-/// Integer arithmetic on purpose. The values are small, the span is exact, and
-/// `(a + b/2) / b` rounds to nearest without floats — which keeps the mapping
-/// reproducible and the conversions total, with no cast that can truncate or
-/// lose a sign.
-fn to_percent(raw: u32) -> u8 {
-    let raw = raw.clamp(RAW_MIN, RAW_MAX);
-    let span = u64::from(RAW_MAX - RAW_MIN);
-    let scaled = u64::from(raw - RAW_MIN) * 100;
-    // Bounded by the clamp above, so the fallback is unreachable.
-    u8::try_from((scaled + span / 2) / span).unwrap_or(100)
-}
-
-fn from_percent(percent: u8) -> u32 {
-    let span = u64::from(RAW_MAX - RAW_MIN);
-    let offset = (u64::from(percent.min(100)) * span + 50) / 100;
-    // `percent` is capped at 100, so `offset` cannot exceed the span.
-    RAW_MIN + u32::try_from(offset).unwrap_or(RAW_MAX - RAW_MIN)
+    bytes.starts_with(&BRIGHTNESS_DESCRIPTOR_PREFIX)
 }
 
 #[cfg(test)]
@@ -211,41 +197,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_ends_of_the_range_are_exact() {
-        // 0% must be the display's own minimum rather than off, and 100% its
-        // maximum rather than one short of it.
-        assert_eq!(from_percent(0), RAW_MIN);
-        assert_eq!(from_percent(100), RAW_MAX);
-        assert_eq!(to_percent(RAW_MIN), 0);
-        assert_eq!(to_percent(RAW_MAX), 100);
-    }
-
-    #[test]
-    fn a_percentage_survives_the_round_trip() {
-        for percent in 0..=100u8 {
-            assert_eq!(to_percent(from_percent(percent)), percent, "at {percent}%");
-        }
-    }
-
-    #[test]
-    fn values_outside_the_range_are_pulled_back_in() {
-        // The display rejects anything outside it, so sending 0 would fail
-        // rather than dim.
-        assert_eq!(from_percent(200), RAW_MAX);
-        assert_eq!(to_percent(0), 0);
-        assert_eq!(to_percent(u32::MAX), 100);
-    }
-
-    #[test]
     fn the_ioctl_numbers_match_the_kernels() {
-        // HIDIOCGFEATURE(7) and HIDIOCSFEATURE(7) as the kernel defines them;
-        // wrong numbers here fail as a confusing EINVAL at runtime.
+        // HIDIOCGFEATURE(7) and HIDIOCSFEATURE(7) as the kernel defines them.
+        // Wrong numbers here are a bare EINVAL at runtime with nothing to
+        // explain it, and libc builds these per architecture, so this pins the
+        // value on the one that matters here.
         assert_eq!(GET_FEATURE, 0xC007_4807);
         assert_eq!(SET_FEATURE, 0xC007_4806);
     }
 
     #[test]
-    fn nits_are_hundredths() {
-        assert_eq!(to_percent(30_200), 50);
+    fn the_report_is_the_length_the_descriptor_says() {
+        // One byte of report id, a 32-bit brightness, and the 16-bit field the
+        // display leaves at zero. The ioctl numbers above encode this length,
+        // so the two must not drift apart.
+        assert_eq!(REPORT_LEN, 1 + 4 + 2);
+    }
+
+    #[test]
+    fn only_apple_displays_that_carry_this_control_are_recognised() {
+        // The vendor prefix alone is not enough: a keyboard is 05ac too.
+        let apple_display = format!("{APPLE}00001114");
+        assert!(apple_display.starts_with(APPLE));
+        assert!(DISPLAY_PRODUCTS.contains(&"00001114"));
+        assert!(DISPLAY_PRODUCTS.contains(&"00001116"));
+        assert!(DISPLAY_PRODUCTS.contains(&"00001118"));
+        assert!(!DISPLAY_PRODUCTS.contains(&"00000250"));
+    }
+
+    #[test]
+    fn the_descriptor_prefix_is_the_monitor_usage_page() {
+        // 05 80 = Usage Page (Monitor), 09 01 = Usage (Monitor Control). This
+        // is what separates the one node that answers from the display's four
+        // others, so it is worth stating rather than leaving in a literal.
+        assert_eq!(BRIGHTNESS_DESCRIPTOR_PREFIX, [0x05, 0x80, 0x09, 0x01]);
     }
 }

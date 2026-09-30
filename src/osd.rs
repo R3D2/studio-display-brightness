@@ -3,6 +3,7 @@
 //! Only for the key bindings and the CLI: the bar module shows the level in the
 //! bar already, and a notification for something you can see would be noise.
 
+use crate::percent::Percent;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -21,7 +22,7 @@ fn id_path() -> Option<PathBuf> {
 ///
 /// Best effort throughout: a missing notification daemon must not stop the
 /// brightness from changing, which has already happened by the time this runs.
-pub fn show(label: &str, percent: u8) {
+pub fn show(label: &str, percent: Percent) {
     let path = id_path();
     let previous = path
         .as_ref()

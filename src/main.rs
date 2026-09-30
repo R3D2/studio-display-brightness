@@ -3,8 +3,10 @@ mod ddc;
 mod hid;
 mod monitors;
 mod osd;
+mod percent;
 mod watch;
 
+use crate::percent::Percent;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
@@ -14,6 +16,12 @@ const STEP: u8 = 5;
 /// What clicking cycles through. Ends at full so a click always gets you back
 /// to a known place rather than wherever the cycle happened to be.
 const PRESETS: [u8; 4] = [25, 50, 75, 100];
+
+/// The presets as levels. `expect` rather than a fallback: these are literals
+/// in this file, so one outside the range is a typo to catch at startup.
+fn presets() -> [Percent; 4] {
+    PRESETS.map(|p| Percent::try_from(p).expect("a preset must be a percentage"))
+}
 
 #[derive(Parser)]
 #[command(
@@ -36,8 +44,8 @@ enum Command {
         ///
         /// Rejected rather than clamped: `set 150` is a mistake, and silently
         /// doing something else is how a mistake goes unnoticed.
-        #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
-        percent: u8,
+        #[arg(value_parser = parse_percent)]
+        percent: Percent,
         #[command(flatten)]
         target: Target,
     },
@@ -112,11 +120,8 @@ fn run() -> Result<()> {
             // The next preset above where it is now, wrapping round. Reading
             // first means a brightness set by anything else still lands
             // somewhere sensible.
-            let next = PRESETS
-                .iter()
-                .copied()
-                .find(|p| *p > now)
-                .unwrap_or(PRESETS[0]);
+            let all = presets();
+            let next = all.iter().copied().find(|p| *p > now).unwrap_or(all[0]);
             display.set(next)?;
             report(&display, next, target.notify)
         }
@@ -148,7 +153,13 @@ fn nudge(target: &Target, delta: i16) -> Result<()> {
     report(&display, next, target.notify)
 }
 
-fn report(display: &monitors::Display, percent: u8, notify: bool) -> Result<()> {
+/// Reads a level a person typed, refusing anything that is not a percentage.
+fn parse_percent(raw: &str) -> Result<Percent, String> {
+    let value: u8 = raw.parse().map_err(|_| format!("{raw} is not a number"))?;
+    Percent::try_from(value).map_err(|e| e.to_string())
+}
+
+fn report(display: &monitors::Display, percent: Percent, notify: bool) -> Result<()> {
     // Written where the bar's `watch` can see it, so scrolling shows up
     // immediately instead of at the next poll.
     watch::note(&display.connector, percent).context("recording the new level")?;

@@ -6,9 +6,14 @@
 //! touches ddcutil until something actually needs a bus, and a Studio Display
 //! never does.
 
+use crate::percent::Percent;
 use crate::{cache, ddc::DdcDisplay, hid::StudioDisplay};
 use anyhow::{anyhow, Context, Result};
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 /// How a display's brightness is reached.
 pub enum Backend {
@@ -29,7 +34,7 @@ pub struct Display {
 impl Display {
     /// Reads the hardware. Slow over DDC — about a second — and a few
     /// milliseconds over USB HID.
-    pub fn get(&self) -> Result<u8> {
+    pub fn get(&self) -> Result<Percent> {
         match &self.backend {
             Backend::Hid(d) => d.get(),
             Backend::Ddc(d) => d.get(),
@@ -40,7 +45,7 @@ impl Display {
     /// Writes the hardware. Does not touch the cache: the caller holds the lock
     /// and records the level, so that the read, the write and the remembering
     /// are one operation rather than three racing ones.
-    pub fn apply(&self, percent: u8) -> Result<()> {
+    pub fn apply(&self, percent: Percent) -> Result<()> {
         match &self.backend {
             Backend::Hid(d) => d.set(percent),
             Backend::Ddc(d) => d.set(percent),
@@ -55,10 +60,10 @@ impl Display {
     }
 
     /// Sets the level and records it, taking the lock for both.
-    pub fn set(&self, percent: u8) -> Result<()> {
+    pub fn set(&self, percent: Percent) -> Result<()> {
         cache::update(|cache| {
             self.apply(percent)?;
-            cache.levels.insert(self.connector.clone(), percent);
+            cache.levels.insert(self.connector.clone(), percent.get());
             Ok(())
         })
     }
@@ -69,7 +74,7 @@ impl Display {
     /// that, every notch of a held scroll wheel reads the same level, computes
     /// the same target, and the brightness moves one step no matter how long
     /// you scroll.
-    pub fn nudge(&self, delta: i16) -> Result<u8> {
+    pub fn nudge(&self, delta: i16) -> Result<Percent> {
         cache::update(|cache| {
             let now = if self.reads_cheaply() {
                 self.get()?
@@ -79,13 +84,13 @@ impl Display {
                 // is that a level changed on the monitor's own buttons is not
                 // noticed until something reads it again.
                 match cache.levels.get(&self.connector).copied() {
-                    Some(level) => level,
+                    Some(level) => Percent::try_from(level).unwrap_or(Percent::MAX),
                     None => self.get()?,
                 }
             };
-            let next = u8::try_from((i16::from(now) + delta).clamp(0, 100)).unwrap_or(0);
+            let next = now.stepped(delta);
             self.apply(next)?;
-            cache.levels.insert(self.connector.clone(), next);
+            cache.levels.insert(self.connector.clone(), next.get());
             Ok(next)
         })
     }
@@ -239,17 +244,69 @@ pub fn focused_name() -> Result<String> {
 /// Asks the compositor what is attached.
 ///
 /// Everything here needs this, including `--display`: the connector names and
-/// the descriptions that decide USB HID against DDC both come from it. There
-/// is no mode that works without a compositor to ask.
+/// the descriptions that decide USB HID against DDC both come from it. There is
+/// no mode that works without a compositor to ask.
 fn hyprland_monitors() -> Result<Vec<Monitor>> {
+    // Hyprland's own IPC socket first. `watch` asks this four times a second
+    // forever, and a Unix socket round trip is a fraction of the cost of
+    // forking hyprctl to do exactly the same thing.
+    // The socket layout is Hyprland's to change, and hyprctl knows how to find
+    // it whatever it becomes. Falling back costs a fork on a machine where the
+    // fast path stopped working, rather than the tool stopping.
+    ask_hyprland("j/monitors").map_or_else(
+        |_| hyprctl_monitors(),
+        |json| serde_json::from_slice(&json).context("Hyprland did not answer with a monitor list"),
+    )
+}
+
+/// The path Hyprland listens on for this session.
+fn hyprland_socket() -> Result<PathBuf> {
+    let signature = std::env::var("HYPRLAND_INSTANCE_SIGNATURE")
+        .context("HYPRLAND_INSTANCE_SIGNATURE is not set")?;
+    Ok(crate::cache::dir()?
+        .join("hypr")
+        .join(signature)
+        .join(".socket.sock"))
+}
+
+/// Sends one command and reads the whole answer.
+///
+/// The protocol is as simple as it looks: write the request, read until the
+/// compositor closes its side.
+fn ask_hyprland(request: &str) -> Result<Vec<u8>> {
+    let mut socket = UnixStream::connect(hyprland_socket()?).context("connecting to Hyprland")?;
+    // Neither side of this should ever block for long, and `watch` has one
+    // thread: a compositor that has stopped answering must not take the bar
+    // down with it.
+    let limit = Duration::from_secs(2);
+    socket.set_read_timeout(Some(limit))?;
+    socket.set_write_timeout(Some(limit))?;
+    socket
+        .write_all(request.as_bytes())
+        .context("asking Hyprland")?;
+    socket.flush()?;
+    let mut answer = Vec::new();
+    socket
+        .read_to_end(&mut answer)
+        .context("reading Hyprland's answer")?;
+    Ok(answer)
+}
+
+fn hyprctl_monitors() -> Result<Vec<Monitor>> {
     let out = Command::new("hyprctl")
         .args(["-j", "monitors"])
         .output()
         .context("running hyprctl — this reads the monitor list from Hyprland")?;
     if !out.status.success() {
+        // hyprctl says nothing on stderr when it cannot find the compositor,
+        // so a bare "hyprctl failed:" would be the whole message.
+        let complaint = String::from_utf8_lossy(&out.stderr);
+        let complaint = complaint.trim();
         return Err(anyhow!(
-            "hyprctl failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "hyprctl {}{}{}",
+            out.status,
+            if complaint.is_empty() { "" } else { ": " },
+            complaint
         ));
     }
     serde_json::from_slice(&out.stdout).context("hyprctl did not answer with a monitor list")

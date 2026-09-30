@@ -9,6 +9,7 @@
 //! wheel shows up at once rather than at the next hardware read.
 
 use crate::monitors::{self, Display};
+use crate::percent::Percent;
 use anyhow::Result;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -48,7 +49,7 @@ fn note_path() -> Result<PathBuf> {
 }
 
 /// Records a level just set, so the bar reflects it without waiting for a read.
-pub fn note(connector: &str, percent: u8) -> Result<()> {
+pub fn note(connector: &str, percent: Percent) -> Result<()> {
     // Atomically, for the same reason the cache is: a reader polling four
     // times a second can otherwise catch this file truncated between the
     // create and the write.
@@ -59,15 +60,18 @@ pub fn note(connector: &str, percent: u8) -> Result<()> {
 ///
 /// `File::create` truncates before writing, so a reader can catch the file
 /// empty or half-written; half a line must not become a brightness.
-fn parse_note(text: &str) -> Option<(&str, u8)> {
+fn parse_note(text: &str) -> Option<(&str, Percent)> {
     let (connector, percent) = text.trim().split_once(' ')?;
     if connector.is_empty() {
         return None;
     }
-    Some((connector, percent.trim().parse().ok()?))
+    Some((
+        connector,
+        Percent::try_from(percent.trim().parse::<u8>().ok()?).ok()?,
+    ))
 }
 
-fn read_note() -> Option<(String, u8, SystemTime)> {
+fn read_note() -> Option<(String, Percent, SystemTime)> {
     let path = note_path().ok()?;
     let when = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
     let text = std::fs::read_to_string(&path).ok()?;
@@ -78,7 +82,7 @@ fn read_note() -> Option<(String, u8, SystemTime)> {
 pub fn run() -> Result<()> {
     let mut displays: Vec<Display> = monitors::all().unwrap_or_default();
     let mut scanned = Instant::now();
-    let mut levels: HashMap<String, (u8, Instant)> = HashMap::new();
+    let mut levels: HashMap<String, (Percent, Instant)> = HashMap::new();
     let mut last_line = String::new();
     let mut last_note: Option<SystemTime> = None;
 
@@ -143,9 +147,9 @@ const fn class_for(percent: u8) -> &'static str {
     }
 }
 
-fn payload(display: &Display, percent: u8) -> Payload {
+fn payload(display: &Display, percent: Percent) -> Payload {
     let name = display.short_name();
-    let class = class_for(percent);
+    let class = class_for(percent.get());
     let mut tooltip = format!("{name} — {percent}%");
     if let monitors::Backend::Hid(studio) = &display.backend {
         // The Studio Display reports what it is actually emitting, which is
@@ -160,7 +164,7 @@ fn payload(display: &Display, percent: u8) -> Payload {
         alt: class.to_string(),
         class: class.to_string(),
         tooltip,
-        percent,
+        percent: percent.get(),
         display: display.connector.clone(),
     }
 }
@@ -195,9 +199,18 @@ mod tests {
 
     #[test]
     fn a_note_reads_back_as_what_was_written() {
-        assert_eq!(parse_note("DP-1 65\n"), Some(("DP-1", 65)));
-        assert_eq!(parse_note("DP-1 0\n"), Some(("DP-1", 0)));
-        assert_eq!(parse_note("HDMI-A-1 100\n"), Some(("HDMI-A-1", 100)));
+        assert_eq!(
+            parse_note("DP-1 65\n").map(|(c, p)| (c, p.get())),
+            Some(("DP-1", 65))
+        );
+        assert_eq!(
+            parse_note("DP-1 0\n").map(|(c, p)| (c, p.get())),
+            Some(("DP-1", 0))
+        );
+        assert_eq!(
+            parse_note("HDMI-A-1 100\n").map(|(c, p)| (c, p.get())),
+            Some(("HDMI-A-1", 100))
+        );
     }
 
     #[test]

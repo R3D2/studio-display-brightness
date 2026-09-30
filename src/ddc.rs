@@ -8,6 +8,7 @@
 //! A read costs roughly a third of a second, which is why nothing here is
 //! called on a timer — see `cache`.
 
+use crate::percent::Percent;
 use anyhow::{anyhow, Context, Result};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -38,7 +39,7 @@ impl DdcDisplay {
         Self { bus }
     }
 
-    pub fn get(&self) -> Result<u8> {
+    pub fn get(&self) -> Result<Percent> {
         let out = ddcutil(
             &["--bus", &self.bus.to_string(), "getvcp", BRIGHTNESS],
             PATIENCE,
@@ -47,7 +48,7 @@ impl DdcDisplay {
             .ok_or_else(|| anyhow!("could not read a brightness value out of: {}", out.trim()))
     }
 
-    pub fn set(&self, percent: u8) -> Result<()> {
+    pub fn set(&self, percent: Percent) -> Result<()> {
         // DDC brightness is already a percentage on every display that reports
         // a maximum of 100, which is all of them in practice.
         ddcutil(
@@ -56,7 +57,7 @@ impl DdcDisplay {
                 &self.bus.to_string(),
                 "setvcp",
                 BRIGHTNESS,
-                &percent.min(100).to_string(),
+                &percent.to_string(),
             ],
             PATIENCE,
         )?;
@@ -106,14 +107,16 @@ fn ddcutil(args: &[&str], patience: Duration) -> Result<String> {
 ///
 /// Its output is meant for people:
 /// `VCP code 0x10 (Brightness    ): current value =    60, max value =   100`
-fn parse_current(text: &str) -> Option<u8> {
+fn parse_current(text: &str) -> Option<Percent> {
     let (_, rest) = text.split_once("current value =")?;
     let digits: String = rest
         .trim_start()
         .chars()
         .take_while(char::is_ascii_digit)
         .collect();
-    digits.parse().ok()
+    // A monitor reporting outside 0..=100 is reporting on a scale this does
+    // not understand, which is worth refusing rather than guessing at.
+    Percent::try_from(digits.parse::<u8>().ok()?).ok()
 }
 
 /// Which I²C bus each DRM connector answers on, from `ddcutil detect`.
@@ -176,7 +179,7 @@ mod tests {
     fn a_getvcp_line_yields_its_number() {
         let line = "VCP code 0x10 (Brightness                    ): \
                     current value =    60, max value =   100";
-        assert_eq!(parse_current(line), Some(60));
+        assert_eq!(parse_current(line).map(Percent::get), Some(60));
     }
 
     #[test]
@@ -184,7 +187,7 @@ mod tests {
         // Both numbers are on the line and the wrong one is always 100, which
         // would look plausible and be wrong.
         let line = "current value =     0, max value =   100";
-        assert_eq!(parse_current(line), Some(0));
+        assert_eq!(parse_current(line).map(Percent::get), Some(0));
     }
 
     #[test]

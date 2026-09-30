@@ -1,4 +1,4 @@
-# studio-display-brightness in the wayle bar, for /etc/nixos/home.nix
+# studio-display-brightness in the wayle bar, by hand
 #
 # Two edits inside services.wayle.settings, the same shape as the timer's.
 # Apply with sudo, then `sudo nixos-rebuild switch`.
@@ -46,9 +46,9 @@
     studio-display-brightness = inputs.studio-display-brightness.packages.${pkgs.system}.default;
   in
 
-# and as a flake input in /etc/nixos/flake.nix:
+# and as a flake input:
 #
-#   studio-display-brightness.url = "path:/home/r3/Projects/studio-display-brightness";
+#   studio-display-brightness.url = "github:OWNER/studio-display-brightness";
 
 # ------------------------------------------------------- 4. keyboard, optional
 # The brightness keys on a keyboard, in the Hyprland config. These act on the

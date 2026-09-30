@@ -43,8 +43,9 @@ impl Display {
         if self.is_studio_display() {
             return "Studio Display".to_string();
         }
-        // "ASUSTek COMPUTER INC PG27UCDM T1LMAS012351" — the model is the part
-        // worth showing; the maker is noise and the serial is not for people.
+        // EDID descriptions read "Dell Inc. U2720Q CFV9N13" — the model is the
+        // part worth showing; the maker is noise and the serial is not for
+        // people.
         self.description
             .split_whitespace()
             .find(|word| word.len() > 3 && word.chars().any(|c| c.is_ascii_digit()))

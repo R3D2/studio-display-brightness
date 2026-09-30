@@ -9,8 +9,8 @@ both, per monitor, and puts the one you are looking at in your status bar.
 
 ```
 $ studio-display-brightness list
-DP-4    60%  DDC/CI   ASUSTek COMPUTER INC PG27UCDM T1LMAS012351
-DP-1   100%  USB HID  Apple Computer Inc StudioDisplay 0xEB2958CF
+DP-3    60%  DDC/CI   Dell Inc. U2720Q
+DP-1   100%  USB HID  Apple Computer Inc StudioDisplay
 ```
 
 Scroll on the bar to change the screen you are pointing at. Nothing runs as
@@ -210,3 +210,7 @@ following the screen you are looking at. That is the only reason this exists.
 ## Licence
 
 MIT.
+
+---
+
+Made by [Eclypsys](https://eclypsys.ch).

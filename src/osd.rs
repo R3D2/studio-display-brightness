@@ -8,9 +8,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn id_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
     base.join("studio-display-brightness.notify")
 }
 

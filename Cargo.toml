@@ -7,6 +7,8 @@ keywords = ["brightness", "ddc", "studio-display", "wayland", "wayle"]
 categories = ["command-line-utilities"]
 readme = "README.md"
 license = "MIT"
+repository = "https://github.com/R3D2/studio-display-brightness"
+homepage = "https://eclypsys.ch"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -18,3 +20,20 @@ libc = "0.2"
 [profile.release]
 opt-level = 2
 strip = true
+
+# Kept clean rather than aspirational: the tree passes all of this today, so a
+# new warning means new code and not a backlog.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "allow"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+# Every unsafe block here talks to an ioctl, and the reasoning for each is the
+# only thing standing between this and undefined behaviour.
+undocumented_unsafe_blocks = "deny"
+# A binary's errors are read by people, not matched on by callers.
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"

@@ -44,9 +44,7 @@ struct Payload {
 }
 
 fn note_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
+    let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
     base.join("studio-display-brightness.state")
 }
 
@@ -126,13 +124,18 @@ pub fn run() -> Result<()> {
     }
 }
 
-fn payload(display: &Display, percent: u8) -> Payload {
-    let name = display.short_name();
-    let class = match percent {
+/// The CSS class the bar styles on, and the key an icon-map is keyed by.
+const fn class_for(percent: u8) -> &'static str {
+    match percent {
         0..=20 => "dim",
         21..=79 => "mid",
         _ => "bright",
-    };
+    }
+}
+
+fn payload(display: &Display, percent: u8) -> Payload {
+    let name = display.short_name();
+    let class = class_for(percent);
     let mut tooltip = format!("{name} — {percent}%");
     if let monitors::Backend::Hid(studio) = &display.backend {
         // The Studio Display reports what it is actually emitting, which is
@@ -149,5 +152,55 @@ fn payload(display: &Display, percent: u8) -> Payload {
         tooltip,
         percent,
         display: display.connector.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_class_follows_the_level() {
+        // The bar styles on this, and the thresholds are the contract: a
+        // change here silently restyles somebody's bar.
+        assert_eq!(class_for(0), "dim");
+        assert_eq!(class_for(20), "dim");
+        assert_eq!(class_for(21), "mid");
+        assert_eq!(class_for(79), "mid");
+        assert_eq!(class_for(80), "bright");
+        assert_eq!(class_for(100), "bright");
+    }
+
+    #[test]
+    fn every_level_has_a_class() {
+        // icon-map lookups fail silently in the bar, so a gap here would show
+        // up as a missing icon and nothing else.
+        for percent in 0..=100u8 {
+            assert!(
+                ["dim", "mid", "bright"].contains(&class_for(percent)),
+                "no class for {percent}%"
+            );
+        }
+    }
+
+    #[test]
+    fn a_note_round_trips_through_its_file() {
+        let line = "DP-1 65";
+        let (connector, percent) = line.trim().split_once(' ').expect("two fields");
+        assert_eq!(connector, "DP-1");
+        assert_eq!(percent.parse::<u8>().expect("a number"), 65);
+    }
+
+    #[test]
+    fn a_truncated_note_is_ignored_rather_than_misread() {
+        // `File::create` truncates before writing, so a reader can catch the
+        // file empty. Half a line must not become a brightness.
+        for bad in ["", "DP-1", "DP-1 ", " 65", "DP-1 abc"] {
+            let parsed = bad
+                .trim()
+                .split_once(' ')
+                .and_then(|(_, p)| p.parse::<u8>().ok());
+            assert!(parsed.is_none(), "{bad:?} should not parse");
+        }
     }
 }

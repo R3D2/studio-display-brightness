@@ -33,6 +33,10 @@ enum Command {
     /// Set it to a percentage.
     Set {
         /// 0 to 100
+        ///
+        /// Rejected rather than clamped: `set 150` is a mistake, and silently
+        /// doing something else is how a mistake goes unnoticed.
+        #[arg(value_parser = clap::value_parser!(u8).range(0..=100))]
         percent: u8,
         #[command(flatten)]
         target: Target,
@@ -74,10 +78,9 @@ struct Target {
 
 impl Target {
     fn resolve(&self) -> Result<monitors::Display> {
-        match &self.display {
-            Some(name) => monitors::by_name(name),
-            None => monitors::focused(),
-        }
+        self.display
+            .as_deref()
+            .map_or_else(monitors::focused, monitors::by_name)
     }
 }
 
@@ -98,11 +101,11 @@ fn run() -> Result<()> {
         }
         Command::Set { percent, target } => {
             let display = target.resolve()?;
-            display.set(percent.min(100))?;
-            report(&display, percent.min(100), target.notify)
+            display.set(percent)?;
+            report(&display, percent, target.notify)
         }
-        Command::Up { step, target } => nudge(&target, step as i16),
-        Command::Down { step, target } => nudge(&target, -(step as i16)),
+        Command::Up { step, target } => nudge(&target, i16::from(step)),
+        Command::Down { step, target } => nudge(&target, -i16::from(step)),
         Command::Cycle(target) => {
             let display = target.resolve()?;
             let now = display.get()?;
@@ -121,17 +124,14 @@ fn run() -> Result<()> {
             for display in monitors::all()? {
                 let level = display
                     .get()
-                    .map(|p| format!("{p:>3}%"))
-                    .unwrap_or_else(|_| "  ?".into());
+                    .map_or_else(|_| "  ?".into(), |p| format!("{p:>3}%"));
                 let how = match display.backend {
                     monitors::Backend::Hid(_) => "USB HID",
                     monitors::Backend::Ddc(_) => "DDC/CI",
                 };
                 println!(
                     "{:<6} {level}  {:<8} {}",
-                    display.connector,
-                    how,
-                    display.description
+                    display.connector, how, display.description
                 );
             }
             Ok(())
@@ -145,7 +145,9 @@ fn run() -> Result<()> {
 fn nudge(target: &Target, delta: i16) -> Result<()> {
     let display = target.resolve()?;
     let now = i16::from(display.get_cached()?);
-    let next = (now + delta).clamp(0, 100) as u8;
+    // Clamped into 0..=100 first, so the conversion cannot fail; the fallback
+    // keeps the cast honest rather than asserting.
+    let next = u8::try_from((now + delta).clamp(0, 100)).unwrap_or(0);
     display.set(next)?;
     report(&display, next, target.notify)
 }

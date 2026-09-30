@@ -93,27 +93,20 @@ fn is_apple_display(description: &str) -> bool {
 }
 
 /// Builds one display, paying for a bus lookup only if this one needs it.
-fn build(monitor: &Monitor, all_names: &[String]) -> Result<Option<Display>> {
+fn build(monitor: &Monitor, all_names: &[String]) -> Option<Display> {
     let backend = if is_apple_display(&monitor.description) {
-        match StudioDisplay::find()? {
-            Some(d) => Backend::Hid(d),
-            None => return Ok(None),
-        }
+        Backend::Hid(StudioDisplay::find()?)
     } else {
-        match bus_for(&monitor.name, all_names) {
-            Some(bus) => Backend::Ddc(DdcDisplay::on_bus(bus)),
-            // Not a Studio Display and not answering DDC: a laptop panel, or a
-            // monitor with DDC/CI switched off in its menu. Listing it with no
-            // way to change it would only be confusing.
-            None => return Ok(None),
-        }
+        // Not a Studio Display and not answering DDC: a laptop panel, or one
+        // with DDC/CI switched off in its menu. Listing it with no way to
+        // change it would only be confusing.
+        Backend::Ddc(DdcDisplay::on_bus(bus_for(&monitor.name, all_names)?))
     };
-    Ok(Some(Display {
+    Some(Display {
         connector: monitor.name.clone(),
         description: monitor.description.clone(),
-
         backend,
-    }))
+    })
 }
 
 /// Which I2C bus a connector answers on, from the cache where possible.
@@ -151,7 +144,7 @@ pub fn all() -> Result<Vec<Display>> {
     let names: Vec<String> = monitors.iter().map(|m| m.name.clone()).collect();
     let mut displays = Vec::new();
     for monitor in &monitors {
-        if let Some(display) = build(monitor, &names)? {
+        if let Some(display) = build(monitor, &names) {
             displays.push(display);
         }
     }
@@ -174,8 +167,7 @@ pub fn focused() -> Result<Display> {
         .find(|m| m.focused)
         .or_else(|| monitors.first())
         .ok_or_else(|| anyhow!("the compositor reports no monitors"))?;
-    build(monitor, &names)?
-        .ok_or_else(|| anyhow!("{} has no brightness control", monitor.name))
+    build(monitor, &names).ok_or_else(|| anyhow!("{} has no brightness control", monitor.name))
 }
 
 pub fn by_name(name: &str) -> Result<Display> {
@@ -185,8 +177,7 @@ pub fn by_name(name: &str) -> Result<Display> {
         .iter()
         .find(|m| m.name.eq_ignore_ascii_case(name))
         .ok_or_else(|| anyhow!("no display called {name}; there is {}", names.join(", ")))?;
-    build(monitor, &names)?
-        .ok_or_else(|| anyhow!("{} has no brightness control", monitor.name))
+    build(monitor, &names).ok_or_else(|| anyhow!("{} has no brightness control", monitor.name))
 }
 
 /// Just the name of the focused screen.

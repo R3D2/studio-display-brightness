@@ -42,8 +42,14 @@ const REPORT_ID: u8 = 1;
 const REPORT_LEN: usize = 7;
 
 /// `_IOC(dir, type, nr, size)`, the encoding Linux uses for ioctl numbers.
+///
+/// The size is a 14-bit field, so a request larger than `_IOC_SIZEMASK` would
+/// silently wrap into the type bits and address some entirely unrelated ioctl.
+/// Nothing here comes close, and the assertion says so rather than trusting it.
 fn ioc(dir: u32, kind: u8, nr: u8, size: usize) -> libc::c_ulong {
-    ((dir << 30) | ((size as u32) << 16) | ((kind as u32) << 8) | nr as u32) as libc::c_ulong
+    debug_assert!(size <= 0x3fff, "ioctl size {size} does not fit the field");
+    let size = u32::try_from(size).unwrap_or(0) & 0x3fff;
+    libc::c_ulong::from((dir << 30) | (size << 16) | (u32::from(kind) << 8) | u32::from(nr))
 }
 
 const READ_WRITE: u32 = 3;
@@ -69,10 +75,8 @@ impl StudioDisplay {
     /// apart by their report descriptor rather than by number: the node whose
     /// descriptor opens with usage page `Monitor` is the one. Hardcoding
     /// `/dev/hidraw11` works right up until something is replugged.
-    pub fn find() -> Result<Option<Self>> {
-        let Ok(entries) = std::fs::read_dir("/sys/class/hidraw") else {
-            return Ok(None);
-        };
+    pub fn find() -> Option<Self> {
+        let entries = std::fs::read_dir("/sys/class/hidraw").ok()?;
         let mut candidates: Vec<PathBuf> = Vec::new();
         for entry in entries.flatten() {
             let sysfs = entry.path();
@@ -89,7 +93,7 @@ impl StudioDisplay {
         // Deterministic across runs; several displays would be a different
         // feature, and picking at random would be worse than picking the first.
         candidates.sort();
-        Ok(candidates.into_iter().next().map(|node| Self { node }))
+        candidates.into_iter().next().map(|node| Self { node })
     }
 
     fn open(&self) -> Result<File> {
@@ -115,9 +119,13 @@ impl StudioDisplay {
         let file = self.open()?;
         let mut buf = [0u8; REPORT_LEN];
         buf[0] = REPORT_ID;
-        let rc = unsafe {
-            libc::ioctl(file.as_raw_fd(), get_feature(REPORT_LEN), buf.as_mut_ptr())
-        };
+        // SAFETY: `file` is an open hidraw node, so the descriptor is valid for
+        // the duration of the call. HIDIOCGFEATURE writes back at most the
+        // number of bytes encoded in the request — REPORT_LEN, the length of
+        // `buf` — and `buf` is a live, uniquely borrowed, correctly aligned
+        // array of that many bytes. Nothing here retains the pointer.
+        let rc =
+            unsafe { libc::ioctl(file.as_raw_fd(), get_feature(REPORT_LEN), buf.as_mut_ptr()) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error())
                 .context("reading the brightness feature report");
@@ -131,8 +139,13 @@ impl StudioDisplay {
         let mut buf = [0u8; REPORT_LEN];
         buf[0] = REPORT_ID;
         buf[1..5].copy_from_slice(&raw.to_le_bytes());
+        // SAFETY: as in `raw`. The pointer is `as_mut_ptr` rather than
+        // `as_ptr` because HIDIOCSFEATURE is encoded `_IOC_READ|_IOC_WRITE`:
+        // today's hidraw only reads from the buffer, but the request says the
+        // kernel may write to it, and handing a write-permitted ioctl a
+        // pointer derived from a shared borrow is not a promise worth making.
         let rc =
-            unsafe { libc::ioctl(file.as_raw_fd(), set_feature(REPORT_LEN), buf.as_ptr()) };
+            unsafe { libc::ioctl(file.as_raw_fd(), set_feature(REPORT_LEN), buf.as_mut_ptr()) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error())
                 .context("writing the brightness feature report");
@@ -172,17 +185,24 @@ fn describes_brightness(sysfs: &Path) -> bool {
     bytes.starts_with(&[0x05, 0x80, 0x09, 0x01])
 }
 
+/// Integer arithmetic on purpose. The values are small, the span is exact, and
+/// `(a + b/2) / b` rounds to nearest without floats — which keeps the mapping
+/// reproducible and the conversions total, with no cast that can truncate or
+/// lose a sign.
 fn to_percent(raw: u32) -> u8 {
     let raw = raw.clamp(RAW_MIN, RAW_MAX);
-    let span = f64::from(RAW_MAX - RAW_MIN);
-    ((f64::from(raw - RAW_MIN) / span) * 100.0).round() as u8
+    let span = u64::from(RAW_MAX - RAW_MIN);
+    let scaled = u64::from(raw - RAW_MIN) * 100;
+    // Bounded by the clamp above, so the fallback is unreachable.
+    u8::try_from((scaled + span / 2) / span).unwrap_or(100)
 }
 
 fn from_percent(percent: u8) -> u32 {
-    let percent = f64::from(percent.min(100)) / 100.0;
-    RAW_MIN + (percent * f64::from(RAW_MAX - RAW_MIN)).round() as u32
+    let span = u64::from(RAW_MAX - RAW_MIN);
+    let offset = (u64::from(percent.min(100)) * span + 50) / 100;
+    // `percent` is capped at 100, so `offset` cannot exceed the span.
+    RAW_MIN + u32::try_from(offset).unwrap_or(RAW_MAX - RAW_MIN)
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -218,8 +238,8 @@ mod tests {
     fn the_ioctl_numbers_match_the_kernels() {
         // HIDIOCGFEATURE(7) and HIDIOCSFEATURE(7) as the kernel defines them;
         // wrong numbers here fail as a confusing EINVAL at runtime.
-        assert_eq!(get_feature(7), 0xC0074807);
-        assert_eq!(set_feature(7), 0xC0074806);
+        assert_eq!(get_feature(7), 0xC007_4807);
+        assert_eq!(set_feature(7), 0xC007_4806);
     }
 
     #[test]

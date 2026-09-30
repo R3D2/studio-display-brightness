@@ -9,7 +9,16 @@
 //! called on a timer — see `cache`.
 
 use anyhow::{anyhow, Context, Result};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// How long any one ddcutil call may take before it is given up on.
+///
+/// A wedged I2C bus makes ddcutil block rather than fail, and `watch` calls
+/// this from its only thread: without a bound, one sulking monitor stops the
+/// bar updating for every display. Generous enough that a slow `detect` on a
+/// machine with many buses still completes.
+const PATIENCE: Duration = Duration::from_secs(30);
 
 /// A monitor reachable over DDC, identified by the I²C bus it answers on.
 pub struct DdcDisplay {
@@ -21,7 +30,7 @@ pub struct DdcDisplay {
 const BRIGHTNESS: &str = "10";
 
 impl DdcDisplay {
-    pub fn on_bus(bus: u32) -> Self {
+    pub const fn on_bus(bus: u32) -> Self {
         Self { bus }
     }
 
@@ -46,10 +55,41 @@ impl DdcDisplay {
 }
 
 fn ddcutil(args: &[&str]) -> Result<String> {
-    let out = Command::new("ddcutil")
+    let mut child = Command::new("ddcutil")
         .args(args)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .context("running ddcutil — it is what talks to DDC monitors, and must be installed")?;
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < PATIENCE => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                // Killed rather than waited on: the caller is a keypress or a
+                // status bar, and neither can afford to block indefinitely on a
+                // monitor that has stopped answering.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(anyhow!(
+                    "ddcutil {} gave no answer in {}s — the monitor may have DDC/CI \
+                     switched off, or its I2C bus may be wedged",
+                    args.join(" "),
+                    PATIENCE.as_secs()
+                ));
+            }
+            Err(e) => return Err(e).context("waiting for ddcutil"),
+        }
+    }
+
+    let out = child
+        .wait_with_output()
+        .context("collecting ddcutil's output")?;
     if !out.status.success() {
         return Err(anyhow!(
             "ddcutil {}: {}",
@@ -93,8 +133,7 @@ pub fn buses_by_connector() -> Result<Vec<(String, u32)>> {
             let connector = connector.trim();
             let short = connector
                 .split_once('-')
-                .map(|(_, rest)| rest.to_string())
-                .unwrap_or_else(|| connector.to_string());
+                .map_or_else(|| connector.to_string(), |(_, rest)| rest.to_string());
             if let Some(bus) = bus.take() {
                 found.push((short, bus));
             }

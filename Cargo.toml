@@ -1,0 +1,20 @@
+[package]
+name = "display-brightness"
+version = "0.1.0"
+edition = "2021"
+description = "Brightness control for external displays on Wayland: Apple Studio Display over USB HID, everything else over DDC/CI, plus a status bar module"
+keywords = ["brightness", "ddc", "studio-display", "wayland", "wayle"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = 2
+strip = true

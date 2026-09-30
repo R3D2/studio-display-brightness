@@ -1,0 +1,58 @@
+# display-brightness in the wayle bar, for /etc/nixos/home.nix
+#
+# Two edits inside services.wayle.settings, the same shape as the timer's.
+# Apply with sudo, then `sudo nixos-rebuild switch`.
+
+# ---------------------------------------------------------------- 1. layout
+# Add "custom-display-brightness" to whichever group you want it in. Next to
+# the clock keeps it away from the notification and tray click targets:
+
+           center = [ "clock" "custom-odoo-timesheet-timer" "custom-display-brightness" "notifications" "systray" ];
+
+# ------------------------------------------------------------- 2. the module
+# Inside the `modules = { ... }` block, in the same `custom` list as the timer.
+# `custom` is a list, and the id is what the layout name refers to:
+# id = "display-brightness" becomes "custom-display-brightness".
+
+        custom = [
+          {
+            id = "odoo-timesheet-timer";
+            # ... the existing entry, unchanged ...
+          }
+          {
+            id = "display-brightness";
+            command = "${display-brightness}/bin/display-brightness watch";
+            mode = "watch";
+            restart-policy = "on-exit";
+            format = "{{ text }}";
+            tooltip-format = "{{ tooltip }}";
+            class-format = "{{ class }}";
+
+            # A custom module is not told which bar it is drawn on, so it
+            # follows the focused screen. With input:follow_mouse = 1 the
+            # focused screen is the one under the pointer, so scrolling on a
+            # bar changes the display that bar belongs to.
+            scroll-up = "${display-brightness}/bin/display-brightness up";
+            scroll-down = "${display-brightness}/bin/display-brightness down";
+            left-click = "${display-brightness}/bin/display-brightness cycle";
+            right-click = "${display-brightness}/bin/display-brightness set 100";
+          }
+        ];
+
+# --------------------------------------------------------------- 3. the input
+# `display-brightness` needs to be in scope. Alongside the timer's let binding:
+
+  let
+    display-brightness = inputs.display-brightness.packages.${pkgs.system}.default;
+  in
+
+# and as a flake input in /etc/nixos/flake.nix:
+#
+#   display-brightness.url = "path:/home/r3/Projects/display-brightness";
+
+# ------------------------------------------------------- 4. keyboard, optional
+# The brightness keys on a keyboard, in the Hyprland config. These act on the
+# focused screen, same as the scroll:
+#
+#   bind = , XF86MonBrightnessUp,   exec, display-brightness up
+#   bind = , XF86MonBrightnessDown, exec, display-brightness down

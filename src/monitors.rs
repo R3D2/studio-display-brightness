@@ -23,7 +23,6 @@ pub struct Display {
     pub connector: String,
     /// What it calls itself, for the tooltip.
     pub description: String,
-    pub focused: bool,
     pub backend: Backend,
 }
 
@@ -112,7 +111,7 @@ fn build(monitor: &Monitor, all_names: &[String]) -> Result<Option<Display>> {
     Ok(Some(Display {
         connector: monitor.name.clone(),
         description: monitor.description.clone(),
-        focused: monitor.focused,
+
         backend,
     }))
 }

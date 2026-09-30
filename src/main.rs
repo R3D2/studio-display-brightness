@@ -1,3 +1,4 @@
+mod cache;
 mod ddc;
 mod hid;
 mod monitors;
@@ -143,7 +144,7 @@ fn run() -> Result<()> {
 /// the bottom should stop, not jump to full brightness.
 fn nudge(target: &Target, delta: i16) -> Result<()> {
     let display = target.resolve()?;
-    let now = i16::from(display.get()?);
+    let now = i16::from(display.get_cached()?);
     let next = (now + delta).clamp(0, 100) as u8;
     display.set(next)?;
     report(&display, next, target.notify)

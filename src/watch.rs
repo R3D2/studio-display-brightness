@@ -21,8 +21,13 @@ use std::time::{Duration, Instant, SystemTime};
 const FOCUS_POLL: Duration = Duration::from_millis(250);
 
 /// How often to ask a display again, for changes made by something else — the
-/// buttons on the monitor, another tool. Rare, and slow over DDC.
-const REREAD: Duration = Duration::from_secs(10);
+/// buttons on the monitor, another tool.
+///
+/// A DDC read is about a second and blocks this loop while it happens, so this
+/// is deliberately long: anything this tool does is published through the note
+/// file and seen within 250ms regardless. What this interval actually costs is
+/// how long a change made on the monitor's own buttons goes unnoticed.
+const REREAD: Duration = Duration::from_secs(60);
 
 /// How often to look for displays being plugged in or unplugged. This is the
 /// expensive one, which is why it is not on the main beat.

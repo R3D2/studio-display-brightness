@@ -9,7 +9,7 @@
 //! wheel shows up at once rather than at the next hardware read.
 
 use crate::monitors::{self, Display};
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::Write;
@@ -43,26 +43,36 @@ struct Payload {
     display: String,
 }
 
-fn note_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    base.join("studio-display-brightness.state")
+fn note_path() -> Result<PathBuf> {
+    Ok(crate::cache::dir()?.join("studio-display-brightness.state"))
 }
 
 /// Records a level just set, so the bar reflects it without waiting for a read.
 pub fn note(connector: &str, percent: u8) -> Result<()> {
-    let path = note_path();
-    let mut file =
-        std::fs::File::create(&path).with_context(|| format!("writing {}", path.display()))?;
-    writeln!(file, "{connector} {percent}")?;
-    Ok(())
+    // Atomically, for the same reason the cache is: a reader polling four
+    // times a second can otherwise catch this file truncated between the
+    // create and the write.
+    crate::cache::write_atomically(&note_path()?, format!("{connector} {percent}\n").as_bytes())
+}
+
+/// Reads a note back.
+///
+/// `File::create` truncates before writing, so a reader can catch the file
+/// empty or half-written; half a line must not become a brightness.
+fn parse_note(text: &str) -> Option<(&str, u8)> {
+    let (connector, percent) = text.trim().split_once(' ')?;
+    if connector.is_empty() {
+        return None;
+    }
+    Some((connector, percent.trim().parse().ok()?))
 }
 
 fn read_note() -> Option<(String, u8, SystemTime)> {
-    let path = note_path();
+    let path = note_path().ok()?;
     let when = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
     let text = std::fs::read_to_string(&path).ok()?;
-    let (connector, percent) = text.trim().split_once(' ')?;
-    Some((connector.to_string(), percent.parse().ok()?, when))
+    let (connector, percent) = parse_note(&text)?;
+    Some((connector.to_string(), percent, when))
 }
 
 pub fn run() -> Result<()> {
@@ -172,35 +182,30 @@ mod tests {
     }
 
     #[test]
-    fn every_level_has_a_class() {
-        // icon-map lookups fail silently in the bar, so a gap here would show
-        // up as a missing icon and nothing else.
-        for percent in 0..=100u8 {
-            assert!(
-                ["dim", "mid", "bright"].contains(&class_for(percent)),
-                "no class for {percent}%"
-            );
-        }
+    fn the_class_only_ever_changes_at_the_documented_boundaries() {
+        // A bar's icon-map is keyed on these three names and fails silently on
+        // a fourth, so the set is a contract. Walking the range also pins where
+        // the steps are, which a wildcard arm cannot guarantee on its own.
+        let changes: Vec<(u8, &str)> = (1..=100u8)
+            .filter(|p| class_for(*p) != class_for(p - 1))
+            .map(|p| (p, class_for(p)))
+            .collect();
+        assert_eq!(changes, vec![(21, "mid"), (80, "bright")]);
     }
 
     #[test]
-    fn a_note_round_trips_through_its_file() {
-        let line = "DP-1 65";
-        let (connector, percent) = line.trim().split_once(' ').expect("two fields");
-        assert_eq!(connector, "DP-1");
-        assert_eq!(percent.parse::<u8>().expect("a number"), 65);
+    fn a_note_reads_back_as_what_was_written() {
+        assert_eq!(parse_note("DP-1 65\n"), Some(("DP-1", 65)));
+        assert_eq!(parse_note("DP-1 0\n"), Some(("DP-1", 0)));
+        assert_eq!(parse_note("HDMI-A-1 100\n"), Some(("HDMI-A-1", 100)));
     }
 
     #[test]
     fn a_truncated_note_is_ignored_rather_than_misread() {
-        // `File::create` truncates before writing, so a reader can catch the
-        // file empty. Half a line must not become a brightness.
-        for bad in ["", "DP-1", "DP-1 ", " 65", "DP-1 abc"] {
-            let parsed = bad
-                .trim()
-                .split_once(' ')
-                .and_then(|(_, p)| p.parse::<u8>().ok());
-            assert!(parsed.is_none(), "{bad:?} should not parse");
+        // The real parser, not a copy of it: a reader can catch this file
+        // empty or half-written, and half a line must not become a brightness.
+        for bad in ["", "   ", "DP-1", "DP-1 ", " 65", "DP-1 abc", "DP-1 999"] {
+            assert!(parse_note(bad).is_none(), "{bad:?} should not parse");
         }
     }
 }

@@ -3,13 +3,13 @@
 //! Only for the key bindings and the CLI: the bar module shows the level in the
 //! bar already, and a notification for something you can see would be noise.
 
-use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-fn id_path() -> PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from);
-    base.join("studio-display-brightness.notify")
+fn id_path() -> Option<PathBuf> {
+    crate::cache::dir()
+        .ok()
+        .map(|dir| dir.join("studio-display-brightness.notify"))
 }
 
 /// Shows the level, replacing the previous notification rather than stacking.
@@ -22,8 +22,10 @@ fn id_path() -> PathBuf {
 /// Best effort throughout: a missing notification daemon must not stop the
 /// brightness from changing, which has already happened by the time this runs.
 pub fn show(label: &str, percent: u8) {
-    let previous = std::fs::read_to_string(id_path())
-        .ok()
+    let path = id_path();
+    let previous = path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|text| text.trim().parse::<u32>().ok())
         .unwrap_or(0);
 
@@ -38,11 +40,9 @@ pub fn show(label: &str, percent: u8) {
         .arg(format!("{label} {percent}%"))
         .output();
 
-    if let Ok(out) = output {
+    if let (Ok(out), Some(path)) = (output, path) {
         if out.status.success() {
-            if let Ok(mut file) = std::fs::File::create(id_path()) {
-                let _ = file.write_all(out.stdout.trim_ascii());
-            }
+            let _ = crate::cache::write_atomically(&path, out.stdout.trim_ascii());
         }
     }
 }

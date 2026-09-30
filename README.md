@@ -19,9 +19,10 @@ logged in.
 
 ## Requirements
 
-- **Hyprland.** `hyprctl` is how the tool knows which screen you are looking at.
-  Nothing else here is compositor-specific, but without it there is no focused
-  screen to act on, so `--display DP-1` becomes mandatory.
+- **Hyprland.** `hyprctl` is how the tool learns which screens exist, what each
+  one is, and which you are looking at -- so it is required outright, not only
+  for the focused-screen shortcut. `--display DP-1` needs it too: the name and
+  the EDID description are what decide USB HID against DDC.
 - **`ddcutil`**, for every monitor that is not a Studio Display.
 - A Studio Display needs its **USB or Thunderbolt cable** to the host, not just
   DisplayPort. Brightness is a USB control; over video alone there is nothing to
@@ -112,16 +113,27 @@ bind = , XF86MonBrightnessDown, exec, studio-display-brightness down
 
 ## What `watch` is careful about
 
-Reading over DDC is slow — a third of a second — and finding out which displays
+Reading over DDC is slow — about a second — and finding out which displays
 answer DDC at all probes every I²C bus. Naïvely polling that is where the
 five-to-ten-second lag people report with `ddcutil` bar modules comes from.
 
 So the set of displays is worked out once and kept, rescanned every thirty
 seconds — or immediately when focus lands on a screen it has never heard of,
-which is a display being plugged in. A level once read is remembered for ten
-seconds. And a level this tool just set is written to a small file under
+which is a display being plugged in. A level once read is remembered for a
+minute, since re-reading blocks the loop for a second on DDC. And a level this tool just set is written to a small file under
 `$XDG_RUNTIME_DIR`, which `watch` notices within 250 ms, so scrolling the wheel
 moves the number at once rather than at the next hardware read.
+
+## Concurrency
+
+Holding the scroll wheel starts a process per notch, several at once, each
+reading the cache, deciding what to do, spending up to a second in `ddcutil`
+and writing back. Writing the file atomically is not enough: the lost update
+happens between the read and the write, so ten notches that all read 60 all
+compute 65 and the brightness moves one step however long you scroll. The
+whole read-modify-write is therefore done under an exclusive `flock`, held
+across the hardware call -- which serialises the `ddcutil` calls too, as they
+need anyway.
 
 ## Status bar
 

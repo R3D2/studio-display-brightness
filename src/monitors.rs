@@ -27,6 +27,8 @@ pub struct Display {
 }
 
 impl Display {
+    /// Reads the hardware. Slow over DDC — about a second — and a few
+    /// milliseconds over USB HID.
     pub fn get(&self) -> Result<u8> {
         match &self.backend {
             Backend::Hid(d) => d.get(),
@@ -35,39 +37,62 @@ impl Display {
         .with_context(|| format!("reading the brightness of {}", self.connector))
     }
 
-    /// The level, preferring what was last recorded when reading is expensive.
-    ///
-    /// A Studio Display is read outright: it takes a few milliseconds and is
-    /// always right. A DDC monitor takes about a second, which is the
-    /// difference between a brightness key that responds and one that does not,
-    /// so a remembered level wins there. The cost is that a level changed with
-    /// the monitor's own buttons is not noticed until something reads it again.
-    pub fn get_cached(&self) -> Result<u8> {
-        if matches!(self.backend, Backend::Hid(_)) {
-            return self.get();
-        }
-        if let Some(level) = cache::load().levels.get(&self.connector).copied() {
-            return Ok(level);
-        }
-        self.get()
-    }
-
-    pub fn set(&self, percent: u8) -> Result<()> {
+    /// Writes the hardware. Does not touch the cache: the caller holds the lock
+    /// and records the level, so that the read, the write and the remembering
+    /// are one operation rather than three racing ones.
+    pub fn apply(&self, percent: u8) -> Result<()> {
         match &self.backend {
             Backend::Hid(d) => d.set(percent),
             Backend::Ddc(d) => d.set(percent),
         }
-        .with_context(|| format!("setting the brightness of {}", self.connector))?;
+        .with_context(|| format!("setting the brightness of {}", self.connector))
+    }
 
-        let mut cache = cache::load();
-        cache.levels.insert(self.connector.clone(), percent);
-        cache::save(&cache);
-        Ok(())
+    /// Whether reading this display is cheap enough to always prefer to a
+    /// remembered value.
+    pub const fn reads_cheaply(&self) -> bool {
+        matches!(self.backend, Backend::Hid(_))
+    }
+
+    /// Sets the level and records it, taking the lock for both.
+    pub fn set(&self, percent: u8) -> Result<()> {
+        cache::update(|cache| {
+            self.apply(percent)?;
+            cache.levels.insert(self.connector.clone(), percent);
+            Ok(())
+        })
+    }
+
+    /// Moves by `delta`, clamped into 0..=100, and reports where it landed.
+    ///
+    /// The read, the write and the record all happen under one lock. Without
+    /// that, every notch of a held scroll wheel reads the same level, computes
+    /// the same target, and the brightness moves one step no matter how long
+    /// you scroll.
+    pub fn nudge(&self, delta: i16) -> Result<u8> {
+        cache::update(|cache| {
+            let now = if self.reads_cheaply() {
+                self.get()?
+            } else {
+                // A DDC read is a second, which is the difference between a
+                // brightness key that responds and one that does not. The cost
+                // is that a level changed on the monitor's own buttons is not
+                // noticed until something reads it again.
+                match cache.levels.get(&self.connector).copied() {
+                    Some(level) => level,
+                    None => self.get()?,
+                }
+            };
+            let next = u8::try_from((i16::from(now) + delta).clamp(0, 100)).unwrap_or(0);
+            self.apply(next)?;
+            cache.levels.insert(self.connector.clone(), next);
+            Ok(next)
+        })
     }
 
     /// A short name for a tooltip: "Studio Display", not the full EDID string.
     pub fn short_name(&self) -> String {
-        if matches!(self.backend, Backend::Hid(_)) {
+        if self.reads_cheaply() {
             return "Studio Display".to_string();
         }
         // EDID descriptions read "Dell Inc. U2720Q CFV9N13" — the model is the
@@ -81,9 +106,11 @@ impl Display {
     }
 }
 
+#[derive(serde::Deserialize)]
 struct Monitor {
     name: String,
     description: String,
+    #[serde(default)]
     focused: bool,
 }
 
@@ -116,26 +143,46 @@ fn build(monitor: &Monitor, all_names: &[String]) -> Option<Display> {
 /// rather than on every keypress.
 fn bus_for(connector: &str, all_names: &[String]) -> Option<u32> {
     let print = cache::fingerprint(all_names);
-    let mut cached = cache::load();
-    if cached.fingerprint == print {
-        if let Some(bus) = cached.buses.get(connector).copied() {
+    let known = cache::read();
+    if known.fingerprint == print {
+        if let Some(bus) = known.buses.get(connector).copied() {
             return Some(bus);
         }
-        // A connector known to be absent from the last detect is absent still;
-        // re-probing every time would cost 19 seconds to learn nothing.
-        if !cached.buses.is_empty() {
+        // A completed probe that did not find it will not find it now either,
+        // and looking again costs nineteen seconds to learn the same thing.
+        if known.without_ddc.iter().any(|name| name == connector) {
             return None;
         }
     }
 
-    let found = crate::ddc::buses_by_connector().unwrap_or_default();
-    cached.fingerprint = print;
-    cached.buses = found.iter().cloned().collect();
-    cache::save(&cached);
-    found
-        .into_iter()
-        .find(|(name, _)| name == connector)
-        .map(|(_, bus)| bus)
+    // The slow path, under the lock so two processes do not probe at once and
+    // so the result cannot be overwritten by a process that loaded the cache
+    // before the probe started.
+    cache::update(|cache| {
+        // Another process may have probed while this one waited for the lock.
+        if cache.fingerprint == print {
+            if let Some(bus) = cache.buses.get(connector).copied() {
+                return Ok(Some(bus));
+            }
+            if cache.without_ddc.iter().any(|name| name == connector) {
+                return Ok(None);
+            }
+        }
+
+        let found = crate::ddc::buses_by_connector()?;
+        cache.fingerprint.clone_from(&print);
+        cache.buses = found.iter().cloned().collect();
+        // Only a probe that completed can say a connector has no DDC. One that
+        // failed leaves the question open rather than pinning a wrong answer
+        // until the monitors change.
+        cache.without_ddc = all_names
+            .iter()
+            .filter(|name| !cache.buses.contains_key(*name))
+            .cloned()
+            .collect();
+        Ok(cache.buses.get(connector).copied())
+    })
+    .unwrap_or(None)
 }
 
 /// Every display we can actually change.
@@ -189,24 +236,21 @@ pub fn focused_name() -> Result<String> {
         .ok_or_else(|| anyhow!("the compositor reports no focused monitor"))
 }
 
+/// Asks the compositor what is attached.
+///
+/// Everything here needs this, including `--display`: the connector names and
+/// the descriptions that decide USB HID against DDC both come from it. There
+/// is no mode that works without a compositor to ask.
 fn hyprland_monitors() -> Result<Vec<Monitor>> {
     let out = Command::new("hyprctl")
         .args(["-j", "monitors"])
         .output()
-        .context("asking hyprctl which monitors exist")?;
-    let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
-        .context("hyprctl did not answer with the monitor list")?;
-    Ok(parsed
-        .as_array()
-        .map(|items| {
-            items
-                .iter()
-                .map(|m| Monitor {
-                    name: m["name"].as_str().unwrap_or_default().to_string(),
-                    description: m["description"].as_str().unwrap_or_default().to_string(),
-                    focused: m["focused"].as_bool().unwrap_or(false),
-                })
-                .collect()
-        })
-        .unwrap_or_default())
+        .context("running hyprctl — this reads the monitor list from Hyprland")?;
+    if !out.status.success() {
+        return Err(anyhow!(
+            "hyprctl failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    serde_json::from_slice(&out.stdout).context("hyprctl did not answer with a monitor list")
 }

@@ -23,15 +23,19 @@
 //! trailing `u16` the display leaves at zero — and the range is the panel's own
 //! 600-nit spec rather than an arbitrary scale.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 
-/// Apple's vendor id and the Studio Display's product id, as hidraw spells them
-/// in `HID_ID=0003:000005AC:00001114`.
-const HID_ID: &str = "0003:000005AC:00001114";
+/// Apple's vendor id, as hidraw spells it in `HID_ID=0003:000005AC:00001114`.
+const APPLE: &str = "0003:000005AC:";
+
+/// The displays that carry this control: the Studio Display and the two Pro
+/// Display XDR variants. The udev rule ships all three, so recognising only
+/// the first would grant a Pro Display XDR access it then never uses.
+const DISPLAY_PRODUCTS: [&str; 3] = ["00001114", "00001116", "00001118"];
 
 /// The display reports brightness in hundredths of a nit, and will not accept
 /// a value outside this range.
@@ -41,27 +45,16 @@ const RAW_MAX: u32 = 60_000;
 const REPORT_ID: u8 = 1;
 const REPORT_LEN: usize = 7;
 
-/// `_IOC(dir, type, nr, size)`, the encoding Linux uses for ioctl numbers.
+/// `HIDIOCGFEATURE(7)` and `HIDIOCSFEATURE(7)`.
 ///
-/// The size is a 14-bit field, so a request larger than `_IOC_SIZEMASK` would
-/// silently wrap into the type bits and address some entirely unrelated ioctl.
-/// Nothing here comes close, and the assertion says so rather than trusting it.
-fn ioc(dir: u32, kind: u8, nr: u8, size: usize) -> libc::c_ulong {
-    debug_assert!(size <= 0x3fff, "ioctl size {size} does not fit the field");
-    let size = u32::try_from(size).unwrap_or(0) & 0x3fff;
-    libc::c_ulong::from((dir << 30) | (size << 16) | (u32::from(kind) << 8) | u32::from(nr))
-}
-
-const READ_WRITE: u32 = 3;
-const HID: u8 = b'H';
-
-fn get_feature(len: usize) -> libc::c_ulong {
-    ioc(READ_WRITE, HID, 0x07, len)
-}
-
-fn set_feature(len: usize) -> libc::c_ulong {
-    ioc(READ_WRITE, HID, 0x06, len)
-}
+/// Built with libc's own `_IOWR` rather than by hand. The bit layout of an
+/// ioctl request is not the same on every architecture — the direction bits
+/// and the size field move on MIPS, PowerPC and SPARC — and the request type
+/// is `c_ulong` against glibc but `c_int` against musl, so a hand-rolled
+/// `c_ulong` would not even compile for a static musl build.
+const HID: u32 = b'H' as u32;
+const GET_FEATURE: libc::Ioctl = libc::_IOWR::<[u8; REPORT_LEN]>(HID, 0x07);
+const SET_FEATURE: libc::Ioctl = libc::_IOWR::<[u8; REPORT_LEN]>(HID, 0x06);
 
 /// A Studio Display, already located.
 pub struct StudioDisplay {
@@ -124,11 +117,18 @@ impl StudioDisplay {
         // number of bytes encoded in the request — REPORT_LEN, the length of
         // `buf` — and `buf` is a live, uniquely borrowed, correctly aligned
         // array of that many bytes. Nothing here retains the pointer.
-        let rc =
-            unsafe { libc::ioctl(file.as_raw_fd(), get_feature(REPORT_LEN), buf.as_mut_ptr()) };
+        let rc = unsafe { libc::ioctl(file.as_raw_fd(), GET_FEATURE, buf.as_mut_ptr()) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error())
                 .context("reading the brightness feature report");
+        }
+        // hidraw copies back however many bytes the report actually had. A
+        // short one leaves the brightness field zeroed, and reporting 0% is
+        // worse than reporting that the read went wrong.
+        if rc < 5 {
+            return Err(anyhow!(
+                "the display answered with {rc} bytes; the brightness field needs 5"
+            ));
         }
         Ok(u32::from_le_bytes([buf[1], buf[2], buf[3], buf[4]]))
     }
@@ -144,8 +144,7 @@ impl StudioDisplay {
         // today's hidraw only reads from the buffer, but the request says the
         // kernel may write to it, and handing a write-permitted ioctl a
         // pointer derived from a shared borrow is not a promise worth making.
-        let rc =
-            unsafe { libc::ioctl(file.as_raw_fd(), set_feature(REPORT_LEN), buf.as_mut_ptr()) };
+        let rc = unsafe { libc::ioctl(file.as_raw_fd(), SET_FEATURE, buf.as_mut_ptr()) };
         if rc < 0 {
             return Err(std::io::Error::last_os_error())
                 .context("writing the brightness feature report");
@@ -164,9 +163,12 @@ fn is_studio_display(sysfs: &Path) -> bool {
     let Ok(uevent) = std::fs::read_to_string(sysfs.join("device/uevent")) else {
         return false;
     };
-    uevent
-        .lines()
-        .any(|line| line.strip_prefix("HID_ID=").is_some_and(|id| id == HID_ID))
+    uevent.lines().any(|line| {
+        line.strip_prefix("HID_ID=").is_some_and(|id| {
+            id.strip_prefix(APPLE)
+                .is_some_and(|product| DISPLAY_PRODUCTS.contains(&product))
+        })
+    })
 }
 
 /// Whether this interface is the one describing a monitor brightness control.
@@ -238,8 +240,8 @@ mod tests {
     fn the_ioctl_numbers_match_the_kernels() {
         // HIDIOCGFEATURE(7) and HIDIOCSFEATURE(7) as the kernel defines them;
         // wrong numbers here fail as a confusing EINVAL at runtime.
-        assert_eq!(get_feature(7), 0xC007_4807);
-        assert_eq!(set_feature(7), 0xC007_4806);
+        assert_eq!(GET_FEATURE, 0xC007_4807);
+        assert_eq!(SET_FEATURE, 0xC007_4806);
     }
 
     #[test]

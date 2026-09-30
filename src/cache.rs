@@ -1,4 +1,5 @@
-//! What this tool would otherwise pay for twice.
+//! What this tool would otherwise pay for twice, and the lock that makes
+//! sharing it safe.
 //!
 //! Two things here are expensive and neither changes often:
 //!
@@ -8,13 +9,30 @@
 //!   seconds**. Doing it per keypress made the brightness keys unusable.
 //! - Reading a level back over DDC is about a second.
 //!
-//! So both are remembered, keyed on the set of monitors currently attached: if
-//! that set is unchanged, so are the buses. The file lives under
-//! `XDG_RUNTIME_DIR`, so it is rebuilt once per boot and cannot outlive a
-//! hardware change that a reboot would fix.
+//! So both are remembered, keyed on the set of monitors attached: if that set
+//! is unchanged, so are the buses.
+//!
+//! # Why there is a lock
+//!
+//! Holding the scroll wheel starts a process per notch, several overlapping.
+//! Every one of them reads this file, decides what to do, spends up to a second
+//! in `ddcutil`, and writes back — a read-modify-write with a very long middle.
+//! Writing the file atomically is not enough, because the lost update happens
+//! between the read and the write, not during it:
+//!
+//! - ten notches that all read 60 all compute 65, and the brightness moves one
+//!   step however long you scroll;
+//! - a process that read the cache before a nineteen-second `detect` can save
+//!   afterwards and wipe the bus map that probe just paid for.
+//!
+//! So the whole read-modify-write is done under an exclusive file lock, held
+//! across the hardware call as well. That serialises the ddcutil calls too,
+//! which they need anyway.
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -26,52 +44,115 @@ pub struct Cache {
     /// Connector name to I2C bus, for the displays that speak DDC.
     #[serde(default)]
     pub buses: HashMap<String, u32>,
+    /// Connectors that a completed probe did not find on any bus, so a second
+    /// probe would cost nineteen seconds to learn the same thing.
+    #[serde(default)]
+    pub without_ddc: Vec<String>,
     /// Last known level per connector. Only worth keeping for DDC displays;
     /// reading a Studio Display is a few milliseconds and always exact.
     #[serde(default)]
     pub levels: HashMap<String, u8>,
 }
 
-fn dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").map_or_else(std::env::temp_dir, PathBuf::from)
-}
-
-pub fn path() -> PathBuf {
-    dir().join("studio-display-brightness.cache.json")
-}
-
-pub fn load() -> Cache {
-    std::fs::read_to_string(path())
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default()
-}
-
-/// Writes the cache so that a reader never sees a half-written one.
-///
-/// This matters more than it looks. Holding the scroll wheel starts a new
-/// process per notch, several of them overlapping, and a torn file does not
-/// fail safe: it fails to parse, `load` hands back a default, the bus map is
-/// treated as unknown and the next change pays nineteen seconds for
-/// `ddcutil detect` again. Writing a temporary file and renaming it means a
-/// reader sees either the old cache or the new one, never a mixture — rename
-/// within a directory is atomic on every filesystem Linux ships.
-///
-/// Best effort otherwise: a cache that cannot be written costs speed, not
-/// correctness.
-pub fn save(cache: &Cache) {
-    let Ok(text) = serde_json::to_string(cache) else {
-        return;
-    };
-    // The pid keeps two processes from picking the same temporary name and
-    // each truncating the other's file before either renames.
-    let temp = dir().join(format!(
-        "studio-display-brightness.cache.{}.tmp",
-        std::process::id()
-    ));
-    if std::fs::write(&temp, text).is_ok() && std::fs::rename(&temp, path()).is_err() {
-        let _ = std::fs::remove_file(&temp);
+impl Cache {
+    /// Reads a cache, treating anything unreadable as empty.
+    ///
+    /// A damaged cache must cost a slow lookup and nothing else, so this never
+    /// fails: an unparseable file means "nothing is known", which is true.
+    pub fn parse(text: &str) -> Self {
+        serde_json::from_str(text).unwrap_or_default()
     }
+}
+
+/// Where per-boot state lives.
+///
+/// `XDG_RUNTIME_DIR` is required rather than falling back to `/tmp`: the
+/// fallback would put a predictable name in a directory every local user can
+/// write, and this file decides which I2C bus gets written to. logind always
+/// sets it for a real session.
+pub fn dir() -> Result<PathBuf> {
+    std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .context(
+            "XDG_RUNTIME_DIR is not set — this expects a logind session, and will not \
+         fall back to a world-writable /tmp for state that decides which device to write to",
+        )
+}
+
+fn path() -> Result<PathBuf> {
+    Ok(dir()?.join("studio-display-brightness.cache.json"))
+}
+
+fn lock_path() -> Result<PathBuf> {
+    Ok(dir()?.join("studio-display-brightness.lock"))
+}
+
+/// Writes a file so that a reader never sees it half-written.
+///
+/// Rename within a directory is atomic on every filesystem Linux ships, so a
+/// reader sees either the old contents or the new, never a mixture.
+pub fn write_atomically(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    // The pid keeps two processes from choosing the same temporary name and
+    // each truncating the other's file before either renames.
+    let temp = parent.join(format!(".{}.{}.tmp", file_stem(path), std::process::id()));
+    if let Err(e) = std::fs::write(&temp, bytes) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e).with_context(|| format!("writing {}", temp.display()));
+    }
+    if let Err(e) = std::fs::rename(&temp, path) {
+        // Otherwise a failed rename leaves the temporary file behind for good.
+        let _ = std::fs::remove_file(&temp);
+        return Err(e).with_context(|| format!("replacing {}", path.display()));
+    }
+    Ok(())
+}
+
+fn file_stem(path: &std::path::Path) -> String {
+    path.file_name()
+        .map_or_else(|| "state".to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// Runs `change` with the cache, under an exclusive lock held throughout.
+///
+/// The lock covers loading, whatever `change` does — including a slow hardware
+/// call — and saving. That is the point: the expensive part sits between the
+/// read and the write, and it is where the lost updates happen.
+///
+/// The lock file is separate from the cache file so that replacing the cache by
+/// rename cannot pull the locked inode out from under another waiter.
+pub fn update<T>(change: impl FnOnce(&mut Cache) -> Result<T>) -> Result<T> {
+    let guard = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path()?)
+        .context("opening the cache lock")?;
+    guard.lock().context("waiting for the cache lock")?;
+
+    let path = path()?;
+    let mut cache = std::fs::read_to_string(&path)
+        .map(|text| Cache::parse(&text))
+        .unwrap_or_default();
+
+    let outcome = change(&mut cache);
+
+    // Saved even when `change` failed: it may have got as far as setting the
+    // hardware, and a level we know about is worth keeping either way.
+    if let Ok(text) = serde_json::to_string(&cache) {
+        let _ = write_atomically(&path, text.as_bytes());
+    }
+    // The lock releases when `guard` drops, after the save.
+    drop(guard);
+    outcome
+}
+
+/// Reads the cache without taking the lock, for callers that only look.
+pub fn read() -> Cache {
+    path()
+        .and_then(|p| Ok(std::fs::read_to_string(p)?))
+        .map(|text| Cache::parse(&text))
+        .unwrap_or_default()
 }
 
 /// Identifies the current set of monitors, so a cache learned from a different
@@ -90,40 +171,58 @@ mod tests {
     fn the_fingerprint_ignores_the_order_monitors_are_listed_in() {
         // hyprctl does not promise an order, and a reshuffle is not a hardware
         // change: treating it as one would re-run a nineteen-second probe.
-        let a = fingerprint(&["DP-1".into(), "DP-4".into()]);
-        let b = fingerprint(&["DP-4".into(), "DP-1".into()]);
-        assert_eq!(a, b);
+        assert_eq!(
+            fingerprint(&["DP-1".into(), "DP-4".into()]),
+            fingerprint(&["DP-4".into(), "DP-1".into()])
+        );
     }
 
     #[test]
     fn a_different_set_of_monitors_is_a_different_fingerprint() {
         let two = fingerprint(&["DP-1".into(), "DP-4".into()]);
-        let one = fingerprint(&["DP-1".into()]);
-        let other = fingerprint(&["DP-1".into(), "HDMI-A-1".into()]);
-        assert_ne!(two, one, "unplugging a monitor must invalidate the buses");
-        assert_ne!(two, other, "swapping one must invalidate them too");
+        assert_ne!(
+            two,
+            fingerprint(&["DP-1".into()]),
+            "unplugging must invalidate"
+        );
+        assert_ne!(
+            two,
+            fingerprint(&["DP-1".into(), "HDMI-A-1".into()]),
+            "swapping one must invalidate too"
+        );
     }
 
     #[test]
-    fn nothing_attached_is_still_a_stable_fingerprint() {
-        assert_eq!(fingerprint(&[]), fingerprint(&[]));
+    fn a_torn_cache_parses_as_empty_rather_than_failing() {
+        // Exercises the real entry point: a half-written file must cost a slow
+        // lookup, not an error.
+        let torn = Cache::parse("{\"buses\": {\"DP-4\": 1");
+        assert!(torn.buses.is_empty());
+        assert!(torn.levels.is_empty());
+        assert_eq!(torn.fingerprint, "");
     }
 
     #[test]
-    fn a_cache_file_that_is_not_json_reads_as_empty_rather_than_failing() {
-        // The point of the default is that a damaged cache costs a slow lookup
-        // and nothing else.
-        let torn: Result<Cache, _> = serde_json::from_str("{\"buses\": {\"DP-4\": 1");
-        assert!(torn.is_err());
-        let empty = Cache::default();
-        assert!(empty.buses.is_empty() && empty.levels.is_empty());
+    fn a_cache_written_by_an_older_build_still_loads() {
+        // Every field carries serde(default), so a missing one is not a reason
+        // to throw the rest away.
+        let old = Cache::parse("{\"buses\":{\"DP-4\":11}}");
+        assert_eq!(old.buses.get("DP-4"), Some(&11));
+        assert!(old.without_ddc.is_empty());
     }
 
     #[test]
-    fn fields_added_later_do_not_break_an_older_cache() {
-        // Every field carries serde(default), so a file written by an older
-        // build still loads instead of being thrown away.
-        let old: Cache = serde_json::from_str("{}").expect("an empty object loads");
-        assert_eq!(old.fingerprint, "");
+    fn a_full_cache_round_trips() {
+        let cache = Cache {
+            fingerprint: "DP-1|DP-4".into(),
+            buses: HashMap::from([("DP-4".to_string(), 11)]),
+            without_ddc: vec!["eDP-1".into()],
+            levels: HashMap::from([("DP-4".to_string(), 60)]),
+        };
+        let back = Cache::parse(&serde_json::to_string(&cache).expect("serialises"));
+        assert_eq!(back.fingerprint, "DP-1|DP-4");
+        assert_eq!(back.buses.get("DP-4"), Some(&11));
+        assert_eq!(back.without_ddc, vec!["eDP-1".to_string()]);
+        assert_eq!(back.levels.get("DP-4"), Some(&60));
     }
 }

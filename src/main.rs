@@ -144,11 +144,7 @@ fn run() -> Result<()> {
 /// the bottom should stop, not jump to full brightness.
 fn nudge(target: &Target, delta: i16) -> Result<()> {
     let display = target.resolve()?;
-    let now = i16::from(display.get_cached()?);
-    // Clamped into 0..=100 first, so the conversion cannot fail; the fallback
-    // keeps the cast honest rather than asserting.
-    let next = u8::try_from((now + delta).clamp(0, 100)).unwrap_or(0);
-    display.set(next)?;
+    let next = display.nudge(delta)?;
     report(&display, next, target.notify)
 }
 

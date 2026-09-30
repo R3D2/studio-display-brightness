@@ -2,6 +2,8 @@
 name = "studio-display-brightness"
 version = "0.1.0"
 edition = "2021"
+# is_none_or (1.82), trim_ascii (1.80), File::lock (1.89) for the cache lock.
+rust-version = "1.89"
 description = "Brightness control for external displays on Wayland: Apple Studio Display over USB HID, everything else over DDC/CI, plus a status bar module"
 keywords = ["brightness", "ddc", "studio-display", "wayland", "wayle"]
 categories = ["command-line-utilities"]

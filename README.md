@@ -13,8 +13,9 @@ DP-4    60%  DDC/CI   ASUSTek COMPUTER INC PG27UCDM T1LMAS012351
 DP-1   100%  USB HID  Apple Computer Inc StudioDisplay 0xEB2958CF
 ```
 
-Scroll on the bar to change the screen you are pointing at. No root, and — for
-the Studio Display — **no udev rule**, whatever the other guides say.
+Scroll on the bar to change the screen you are pointing at. Nothing runs as
+root, and nothing needs to: one udev rule hands the display to whoever is
+logged in.
 
 ## Requirements
 
@@ -57,9 +58,12 @@ Three things that cost an evening if you rediscover them:
   apart here by their report descriptor — the one that opens with usage page
   `Monitor` — rather than by number, because `/dev/hidraw11` is correct right up
   until something is replugged.
-- **No root, and no udev rule.** `logind` already grants the active session an
-  ACL on the node (`user:you:rw-`). Guides that tell you to write a udev rule are
-  describing a machine where that is not set up.
+- **The udev rule wants `TAG+="uaccess"`, not a group.** hidraw nodes are
+  root-only by default, so a rule is needed either way — but tagging the device
+  `uaccess` makes logind give an ACL to whoever is actually logged in
+  (`user:you:rw-`), which follows the session. Granting a group instead hands
+  the display to that group on every seat, including the ones nobody is sitting
+  at. The NixOS module below installs the tagging version.
 - **0% is not off.** The display refuses anything below 400 (4 nits), so the
   percentage is mapped onto 400–60000 rather than 0–60000.
 
@@ -129,18 +133,63 @@ Nix version.
 The same `watch` output works anywhere that takes a JSON line: `text`, `class`
 (`dim`/`mid`/`bright`), `tooltip`, `percent` and `display`.
 
-## Installing
+## Installing on NixOS
 
-The flake exposes a NixOS module that installs `ddcutil`, loads `i2c-dev` and
-puts the users you name in the `i2c` group. The Studio Display needs none of
-that; every other monitor needs all of it.
+Add the flake as an input, then the NixOS module. It installs the binary, writes
+the udev rule the Studio Display needs, and — for DDC monitors — pulls in
+`ddcutil`, loads `i2c-dev` and puts the users you name in the `i2c` group.
 
 ```nix
+# flake.nix
+inputs.studio-display-brightness.url = "github:you/studio-display-brightness";
+
+# configuration.nix
+imports = [ inputs.studio-display-brightness.nixosModules.default ];
+
 services.studio-display-brightness = {
   enable = true;
-  users = [ "you" ];
+  users = [ "you" ];   # only needed for DDC monitors
 };
 ```
+
+Only ever using a Studio Display? `ddc = false` skips `ddcutil`, the `i2c`
+group and opening the I2C buses at all:
+
+```nix
+services.studio-display-brightness = { enable = true; ddc = false; };
+```
+
+The status bar module is a home-manager one, because that is where a bar's
+config lives:
+
+```nix
+imports = [ inputs.studio-display-brightness.homeManagerModules.default ];
+
+programs.studio-display-brightness = {
+  enable = true;
+  wayle.enable = true;      # defines the module; step = 5 by default
+};
+
+# then put it in a bar, which is yours to place:
+services.wayle.settings.bar.layout = [{
+  monitor = "*";
+  center = [ "clock" "custom-studio-display-brightness" ];
+}];
+```
+
+There is an `overlays.default` too, if you would rather have it in `pkgs`.
+
+### Without the modules
+
+`wayle-module.toml` is the bar module on its own, and `home-nix.patch` spells
+out the same edits by hand. The udev rule, if you are writing it yourself:
+
+```
+SUBSYSTEM=="hidraw", KERNEL=="hidraw*", ATTRS{idVendor}=="05ac", \
+  ATTRS{idProduct}=="1114", MODE="0660", TAG+="uaccess"
+```
+
+`1116` and `1118` are the Pro Display XDR variants and take the same line.
 
 ## Prior art
 

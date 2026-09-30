@@ -1,15 +1,32 @@
-# display-brightness
+# studio-display-brightness
 
-Brightness for external displays on Wayland, as a status bar module and a
-command. Two displays, two entirely different protocols, one interface:
+**Brightness control for the Apple Studio Display on Linux — and for every other
+monitor on the same machine, from the same command.**
+
+The Studio Display does not speak DDC/CI, so the usual tools cannot see it.
+Everything else does, and needs a completely different protocol. This handles
+both, per monitor, and puts the one you are looking at in your status bar.
 
 ```
-$ display-brightness list
+$ studio-display-brightness list
 DP-4    60%  DDC/CI   ASUSTek COMPUTER INC PG27UCDM T1LMAS012351
 DP-1   100%  USB HID  Apple Computer Inc StudioDisplay 0xEB2958CF
 ```
 
-## The Studio Display does not speak DDC/CI
+Scroll on the bar to change the screen you are pointing at. No root, and — for
+the Studio Display — **no udev rule**, whatever the other guides say.
+
+## Requirements
+
+- **Hyprland.** `hyprctl` is how the tool knows which screen you are looking at.
+  Nothing else here is compositor-specific, but without it there is no focused
+  screen to act on, so `--display DP-1` becomes mandatory.
+- **`ddcutil`**, for every monitor that is not a Studio Display.
+- A Studio Display needs its **USB or Thunderbolt cable** to the host, not just
+  DisplayPort. Brightness is a USB control; over video alone there is nothing to
+  talk to.
+
+## Why the Studio Display needs its own path
 
 `ddcutil detect` lists it as **Invalid display**, which is what sends people
 looking for a vendor tool. There is no need for one: the display describes the
@@ -34,28 +51,28 @@ of a nit, and a trailing `u16` the display leaves at zero — and the range is t
 panel's own 600-nit spec rather than an arbitrary scale. That is why the tooltip
 can say `421 nits` and mean it.
 
-Three details that cost time if you rediscover them:
+Three things that cost an evening if you rediscover them:
 
 - **The display presents five hidraw nodes and only one answers.** They are told
-  apart by their report descriptor — the one that opens with usage page
-  `Monitor` — rather than by number, because `/dev/hidraw11` is right until
-  something is replugged.
+  apart here by their report descriptor — the one that opens with usage page
+  `Monitor` — rather than by number, because `/dev/hidraw11` is correct right up
+  until something is replugged.
 - **No root, and no udev rule.** `logind` already grants the active session an
-  ACL on the node (`user:you:rw-`). Every guide that tells you to write a udev
-  rule is describing a machine where that is not set up.
+  ACL on the node (`user:you:rw-`). Guides that tell you to write a udev rule are
+  describing a machine where that is not set up.
 - **0% is not off.** The display refuses anything below 400 (4 nits), so the
   percentage is mapped onto 400–60000 rather than 0–60000.
 
-Everything else goes through `ddcutil`, which carries years of per-model quirks
-and retries that are not worth rediscovering one monitor at a time.
+Everything that is not a Studio Display goes through `ddcutil`, which carries
+years of per-model quirks and retries that are not worth rediscovering one
+monitor at a time.
 
 ## Which screen it acts on
 
-A wayle custom module is not told which bar it is drawn on, so it follows the
-**focused** screen instead. Under `input:follow_mouse = 1` — the default across
-most of the wlroots family — the focused screen is the one under the pointer,
-which is the one whose bar you just scrolled on. So the obvious thing happens
-without naming a display:
+A status bar module is not told which bar it is drawn on, so it follows the
+**focused** screen. Under `input:follow_mouse = 1` — the Hyprland default — the
+focused screen is the one under the pointer, which is the one whose bar you just
+scrolled on. So the obvious thing happens without naming a display:
 
 | | |
 | --- | --- |
@@ -64,50 +81,83 @@ without naming a display:
 | Right click | full brightness |
 
 Name one explicitly with `--display DP-1` when you want to be sure, which is
-what a keybinding on a specific monitor wants.
+what a keybinding tied to one monitor wants.
 
 ## Commands
 
 | | |
 | --- | --- |
-| `display-brightness list` | Every display that can be controlled, and how |
-| `display-brightness get` | The focused screen's level |
-| `display-brightness set 70` | Set it |
-| `display-brightness up` / `down` | ±5%, `--step N` to change that |
-| `display-brightness cycle` | Next preset |
-| `display-brightness watch` | JSON for the bar, one line per change |
+| `studio-display-brightness list` | Every display that can be controlled, and how |
+| `studio-display-brightness get` | The focused screen's level |
+| `studio-display-brightness set 70` | Set it |
+| `studio-display-brightness up` / `down` | ±5%, `--step N` to change that |
+| `studio-display-brightness cycle` | Next preset |
+| `studio-display-brightness watch` | JSON for the status bar, one line per change |
 
 All of them take `--display DP-1`.
 
 Stepping **clamps rather than wraps**. Scrolling past the bottom stops at the
 minimum; it does not jump to full brightness in a dark room.
 
+Keyboard, in your Hyprland config:
+
+```
+bind = , XF86MonBrightnessUp,   exec, studio-display-brightness up
+bind = , XF86MonBrightnessDown, exec, studio-display-brightness down
+```
+
 ## What `watch` is careful about
 
-Finding out which displays answer DDC probes every I²C bus and costs the best
-part of a second, so the set of displays is worked out once and kept, rescanned
-every thirty seconds — or immediately when focus lands on a screen it has never
-heard of, which is a display being plugged in.
+Reading over DDC is slow — a third of a second — and finding out which displays
+answer DDC at all probes every I²C bus. Naïvely polling that is where the
+five-to-ten-second lag people report with `ddcutil` bar modules comes from.
 
-Reading a level over DDC is slow too, so a level once read is remembered for ten
+So the set of displays is worked out once and kept, rescanned every thirty
+seconds — or immediately when focus lands on a screen it has never heard of,
+which is a display being plugged in. A level once read is remembered for ten
 seconds. And a level this tool just set is written to a small file under
-`$XDG_RUNTIME_DIR`, which `watch` notices within 250 ms — so scrolling the wheel
+`$XDG_RUNTIME_DIR`, which `watch` notices within 250 ms, so scrolling the wheel
 moves the number at once rather than at the next hardware read.
 
-## Installing
+## Status bar
 
-`wayle-module.toml` is the bar module. On a home-manager machine the wayle
-config is a read-only store symlink, so the block belongs in
-`services.wayle.settings` instead — `home-nix.patch` has the Nix version,
-including the optional `XF86MonBrightness` keybindings.
+`wayle-module.toml` is the module definition for [wayle](https://wayle.app). On
+a home-manager machine the wayle config is a read-only store symlink, so the
+block belongs in `services.wayle.settings` instead — `home-nix.patch` has the
+Nix version.
+
+The same `watch` output works anywhere that takes a JSON line: `text`, `class`
+(`dim`/`mid`/`bright`), `tooltip`, `percent` and `display`.
+
+## Installing
 
 The flake exposes a NixOS module that installs `ddcutil`, loads `i2c-dev` and
 puts the users you name in the `i2c` group. The Studio Display needs none of
 that; every other monitor needs all of it.
 
 ```nix
-services.display-brightness = {
+services.studio-display-brightness = {
   enable = true;
-  users = [ "r3" ];
+  users = [ "you" ];
 };
 ```
+
+## Prior art
+
+- [`asdbctl`](https://github.com/juliuszint/asdbctl) — Studio Display only, and
+  the tool to use if that is all you need.
+- [`asdcontrol`](https://github.com/nikosdion/asdcontrol) — the original, via
+  hiddev.
+- [`hid-apple-studio-display`](https://github.com/michaljach/hid-apple-studio-display)
+  — a kernel driver exposing the display as `/sys/class/backlight`, so
+  `brightnessctl` works. A good route if you would rather not run a daemon,
+  though it does not help with your other monitors.
+- [`ddcci-driver-linux`](https://gitlab.com/ddcci-driver-linux/ddcci-driver-linux)
+  — the same idea for DDC monitors.
+
+What none of them do is cover both kinds of display at once, per monitor,
+following the screen you are looking at. That is the only reason this exists.
+
+## Licence
+
+MIT.

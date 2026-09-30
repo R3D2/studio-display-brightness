@@ -15,7 +15,7 @@ const PRESETS: [u8; 4] = [25, 50, 75, 100];
 
 #[derive(Parser)]
 #[command(
-    name = "display-brightness",
+    name = "studio-display-brightness",
     about = "Brightness for external displays: Apple Studio Display over USB HID, the rest over DDC/CI",
     version
 )]
@@ -76,7 +76,7 @@ impl Target {
 
 fn main() {
     if let Err(e) = run() {
-        eprintln!("display-brightness: {e:#}");
+        eprintln!("studio-display-brightness: {e:#}");
         std::process::exit(1);
     }
 }

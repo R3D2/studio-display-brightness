@@ -1,5 +1,5 @@
 {
-  description = "display-brightness — brightness for external displays on Wayland";
+  description = "studio-display-brightness — brightness for external displays on Wayland";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -13,9 +13,9 @@
       # Display needs none of this: logind already grants the active session
       # access to its hidraw node, so no udev rule of our own is required.
       nixosModule = { config, lib, pkgs, ... }:
-        let cfg = config.services.display-brightness;
+        let cfg = config.services.studio-display-brightness;
         in {
-          options.services.display-brightness = {
+          options.services.studio-display-brightness = {
             enable = lib.mkEnableOption "brightness control for external displays";
 
             package = lib.mkOption {
@@ -53,13 +53,13 @@
     in
     {
       nixosModules.default = nixosModule;
-      nixosModules.display-brightness = nixosModule;
+      nixosModules.studio-display-brightness = nixosModule;
     }
     // flake-utils.lib.eachDefaultSystem (system:
       let pkgs = nixpkgs.legacyPackages.${system};
       in {
         packages.default = pkgs.rustPlatform.buildRustPackage {
-          pname = "display-brightness";
+          pname = "studio-display-brightness";
           version = "0.1.0";
           src = pkgs.lib.cleanSource ./.;
           cargoLock.lockFile = ./Cargo.lock;
@@ -70,13 +70,13 @@
           # how we learn which screen you are looking at. Both go on the PATH
           # rather than being hoped for.
           postInstall = ''
-            wrapProgram $out/bin/display-brightness \
+            wrapProgram $out/bin/studio-display-brightness \
               --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ddcutil pkgs.hyprland ]}
           '';
 
           meta = {
             description = "Brightness for external displays on Wayland: Apple Studio Display over USB HID, the rest over DDC/CI, plus a status bar module";
-            mainProgram = "display-brightness";
+            mainProgram = "studio-display-brightness";
           };
         };
 

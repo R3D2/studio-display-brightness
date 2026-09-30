@@ -1,4 +1,4 @@
-# display-brightness — wayle custom module
+# studio-display-brightness — wayle custom module
 #
 # The bar shows the brightness of the screen you are looking at:
 #   DP-1 focused -> "100%"  class "bright"
@@ -10,8 +10,8 @@
 # See home-nix.patch next to this file for the Nix version.
 
 [[modules.custom]]
-id = "display-brightness"
-command = "display-brightness watch"
+id = "studio-display-brightness"
+command = "studio-display-brightness watch"
 mode = "watch"                   # one JSON line per change, no polling
 restart-policy = "on-exit"
 format = "{{ text }}"
@@ -21,7 +21,7 @@ class-format = "{{ class }}"     # dim | mid | bright, for styling
 # A custom module is not told which bar it is on, so it follows the focused
 # screen instead. Under focus-follows-mouse the screen you are pointing at is
 # the focused one, so scrolling on a bar changes the display that bar is on.
-scroll-up = "display-brightness up"
-scroll-down = "display-brightness down"
-left-click = "display-brightness cycle"
-right-click = "display-brightness set 100"
+scroll-up = "studio-display-brightness up"
+scroll-down = "studio-display-brightness down"
+left-click = "studio-display-brightness cycle"
+right-click = "studio-display-brightness set 100"

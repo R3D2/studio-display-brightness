@@ -42,7 +42,7 @@ fn note_path() -> PathBuf {
     let base = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
-    base.join("display-brightness.state")
+    base.join("studio-display-brightness.state")
 }
 
 /// Records a level just set, so the bar reflects it without waiting for a read.
